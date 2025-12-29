@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="員工KPI考核系統 (優化版)", layout="wide", page_icon="📈")
+st.set_page_config(page_title="員工KPI考核系統 (最終修復版)", layout="wide", page_icon="📈")
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
 
@@ -41,22 +41,94 @@ class KPIDB:
             st.error(f"連線失敗: {e}")
             st.stop()
 
+    # --- [修復] 更安全的讀取，確保欄位存在 ---
     def get_df(self, table_name):
+        # 定義標準欄位，若讀取為空或缺欄位時使用
+        defaults = {
+            "tasks": ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at'],
+            "employees": ["email", "name", "password", "department", "manager_email", "role"],
+            "departments": ["dept_id", "dept_name", "level", "parent_dept_id"]
+        }
+        
         for i in range(3):
             try:
-                if table_name == "employees": return pd.DataFrame(self.ws_emp.get_all_records())
-                elif table_name == "departments": return pd.DataFrame(self.ws_dept.get_all_records())
-                elif table_name == "tasks": return pd.DataFrame(self.ws_tasks.get_all_records())
+                ws = None
+                if table_name == "employees": ws = self.ws_emp
+                elif table_name == "departments": ws = self.ws_dept
+                elif table_name == "tasks": ws = self.ws_tasks
+                
+                if ws:
+                    data = ws.get_all_records()
+                    df = pd.DataFrame(data)
+                    
+                    # 防呆：如果資料庫是空的，或欄位被刪除，回傳空結構
+                    if df.empty and table_name in defaults:
+                        return pd.DataFrame(columns=defaults[table_name])
+                    
+                    # 再次確認關鍵欄位是否存在 (防止 KeyError)
+                    if table_name == "tasks" and "task_id" not in df.columns:
+                        # 自動修復標題
+                        ws.clear()
+                        ws.append_row(defaults["tasks"])
+                        return pd.DataFrame(columns=defaults["tasks"])
+                        
+                    return df
             except APIError: time.sleep(1)
         return pd.DataFrame()
 
     def batch_update_sheet(self, ws, df, key_col):
         try:
             ws.clear()
+            # 確保寫入時包含 Header
             ws.update([df.columns.values.tolist()] + df.values.tolist())
             return True, "更新成功"
         except Exception as e: return False, str(e)
 
+    # --- 批次新增任務 (包含自動補標題) ---
+    def batch_add_tasks(self, df_tasks):
+        try:
+            # 防呆檢查: 結束日 >= 開始日
+            for idx, row in df_tasks.iterrows():
+                try:
+                    s_date = pd.to_datetime(row['start_date'])
+                    e_date = pd.to_datetime(row['end_date'])
+                    if e_date < s_date:
+                        return False, f"錯誤: 任務 '{row['task_name']}' 的結束日期不能早於開始日期！"
+                except:
+                    return False, f"錯誤: 任務 '{row['task_name']}' 日期格式不正確"
+
+            # 補上系統欄位
+            # 使用 timestamp + index 確保唯一性
+            base_id = int(time.time())
+            df_tasks['task_id'] = [f"{base_id}_{i}" for i in range(len(df_tasks))]
+            
+            df_tasks['points'] = 0
+            df_tasks['status'] = "Draft"
+            df_tasks['progress_pct'] = 0
+            df_tasks['progress_desc'] = ""
+            df_tasks['manager_comment'] = ""
+            df_tasks['created_at'] = str(date.today())
+            df_tasks['approved_at'] = ""
+            
+            df_tasks['start_date'] = df_tasks['start_date'].astype(str)
+            df_tasks['end_date'] = df_tasks['end_date'].astype(str)
+
+            cols = ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at']
+            for c in cols:
+                if c not in df_tasks.columns: df_tasks[c] = ""
+            
+            # 檢查是否需要補標題
+            current_data = self.ws_tasks.get_all_values()
+            if not current_data:
+                # 如果是空的，先寫入標題
+                self.ws_tasks.append_row(cols)
+                
+            values = df_tasks[cols].values.tolist()
+            self.ws_tasks.append_rows(values)
+            return True, f"已新增 {len(values)} 筆任務"
+        except Exception as e: return False, str(e)
+
+    # ... (其餘函式保持不變，直接使用) ...
     def save_employees_from_editor(self, df_new):
         cols = ["email", "name", "password", "department", "manager_email", "role"]
         for c in cols: 
@@ -90,40 +162,6 @@ class KPIDB:
             df.rename(columns=rename_map, inplace=True)
             combined = pd.concat([current, df], ignore_index=True).drop_duplicates(subset=['dept_id'], keep='last')
             return self.save_depts_from_editor(combined)
-        except Exception as e: return False, str(e)
-
-    def batch_add_tasks(self, df_tasks):
-        try:
-            # 防呆檢查: 結束日 >= 開始日
-            for idx, row in df_tasks.iterrows():
-                try:
-                    s_date = pd.to_datetime(row['start_date'])
-                    e_date = pd.to_datetime(row['end_date'])
-                    if e_date < s_date:
-                        return False, f"錯誤: 任務 '{row['task_name']}' 的結束日期不能早於開始日期！"
-                except:
-                    return False, f"錯誤: 任務 '{row['task_name']}' 日期格式不正確"
-
-            # 補上系統欄位
-            df_tasks['task_id'] = df_tasks.apply(lambda x: str(int(time.time())) + str(x.name), axis=1)
-            df_tasks['points'] = 0
-            df_tasks['status'] = "Draft"
-            df_tasks['progress_pct'] = 0
-            df_tasks['progress_desc'] = ""
-            df_tasks['manager_comment'] = ""
-            df_tasks['created_at'] = str(date.today())
-            df_tasks['approved_at'] = ""
-            
-            df_tasks['start_date'] = df_tasks['start_date'].astype(str)
-            df_tasks['end_date'] = df_tasks['end_date'].astype(str)
-
-            cols = ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at']
-            for c in cols:
-                if c not in df_tasks.columns: df_tasks[c] = ""
-                
-            values = df_tasks[cols].values.tolist()
-            self.ws_tasks.append_rows(values)
-            return True, f"已新增 {len(values)} 筆任務"
         except Exception as e: return False, str(e)
 
     def batch_update_tasks_status(self, updates_list):
@@ -206,6 +244,8 @@ def calc_expected_progress(start_str, end_str):
         if total <= 0: return 100
         return int(((today - s).days / total) * 100)
     except: return 0
+
+# --- UI 介面 ---
 
 def login_page():
     st.markdown("## 📈 員工點數制 KPI 系統")
@@ -335,8 +375,13 @@ def employee_page():
             my_tasks = df_tasks[df_tasks['owner_email'] == user['email']]
             for i, r in my_tasks.iterrows():
                 color = "green" if r['status']=="Approved" else "red" if r['status']=="Rejected" else "blue"
+                
+                # --- [修復重點] 安全讀取 task_id ---
+                tid = str(r.get('task_id', ''))
+                if not tid: continue # 跳過無效資料
+                
                 with st.expander(f":{color}[{r['status']}] {r['task_name']} ({r['size']})"):
-                    st.write(f"📅 {r['start_date']} ~ {r['end_date']} | 📌 {r['description']}")
+                    st.write(f"📅 {r['start_date']} ~ {r['end_date']} | 📌 說明: {r['description']}")
                     if r['manager_comment']: st.info(f"主管評語: {r['manager_comment']}")
                     
                     if r['status'] == "Approved":
@@ -344,15 +389,15 @@ def employee_page():
                         c1, c2 = st.columns(2)
                         c1.metric("目前進度", f"{r['progress_pct']}%")
                         c2.metric("預計進度", f"{exp}%", delta=r['progress_pct']-exp)
-                        with st.form(f"p_{r['task_id']}"):
+                        with st.form(f"p_{tid}"):
                             np = st.slider("更新進度", 0, 100, int(r['progress_pct']))
                             nd = st.text_input("回報說明", max_chars=50)
                             if st.form_submit_button("回報"):
-                                sys.update_progress(r['task_id'], np, nd)
+                                sys.update_progress(tid, np, nd)
                                 st.rerun()
                     elif r['status'] in ["Draft", "Rejected"]:
-                        if st.button("送出審核", key=f"s_{r['task_id']}"):
-                            sys.update_task_status(r['task_id'], "Submitted")
+                        if st.button("送出審核", key=f"s_{tid}"):
+                            sys.update_task_status(tid, "Submitted")
                             st.success("已送出"); time.sleep(1); st.rerun()
         else: st.info("尚無任務")
 
@@ -404,6 +449,7 @@ def employee_page():
             up_t = st.file_uploader("上傳任務 Excel", type=["xlsx"])
             if up_t and st.button("確認匯入任務"):
                 df_up = pd.read_excel(up_t)
+                # 簡單欄位對應
                 rename_map = {"任務名稱":"task_name", "說明":"description", "開始日期":"start_date", "結束日期":"end_date", "大小":"size"}
                 df_up.rename(columns=rename_map, inplace=True)
                 df_up['owner_email'] = user['email']
