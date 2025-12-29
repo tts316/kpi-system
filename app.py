@@ -55,15 +55,11 @@ class KPIDB:
         try:
             # 讀取現有資料建立 Map
             current = ws.get_all_records()
-            # 假設 key 是字串
-            key_map = {str(r[key_col]): i+2 for i, r in enumerate(current)} 
-            
-            # 這裡簡化邏輯：為了確保資料一致性與處理刪除/修改，
-            # 我們採用「全量覆蓋」或「Append」策略比較安全，但在 Google Sheet API 限制下，
-            # 若資料量不大，清空重寫是最乾淨的 (除了 Admin 表)。
-            # 考慮到保留 ID 不變，我們採用：清空 -> 寫入 Header -> 寫入新 DF
+            # 這裡採用全量覆蓋策略，確保刪除與修改同步
+            # 注意：這會清除原有資料，請確保 df 是最新的完整資料
             
             ws.clear()
+            # 確保欄位順序與原始一致，避免錯位
             ws.update([df.columns.values.tolist()] + df.values.tolist())
             return True, "更新成功"
         except Exception as e: return False, str(e)
@@ -82,14 +78,16 @@ class KPIDB:
     def batch_import_employees(self, df):
         try:
             current = self.get_df("employees")
-            # 合併
+            # 確保 current 是 DataFrame
+            if current.empty: current = pd.DataFrame(columns=["email", "name", "password", "department", "manager_email", "role"])
+            
+            # 處理匯入資料
             df['role'] = 'user'
-            # 簡單處理：append
-            combined = pd.concat([current, df], ignore_index=True).drop_duplicates(subset=['Email'], keep='last')
-            # Mapping columns if needed, here assume template matches
-            # 需對應欄位名稱: Excel中文 -> DB英文
             rename_map = {"Email": "email", "姓名": "name", "密碼": "password", "單位": "department", "主管Email": "manager_email"}
-            combined.rename(columns=rename_map, inplace=True)
+            df.rename(columns=rename_map, inplace=True)
+            
+            # 合併
+            combined = pd.concat([current, df], ignore_index=True).drop_duplicates(subset=['email'], keep='last')
             return self.save_employees_from_editor(combined)
         except Exception as e: return False, str(e)
 
@@ -104,6 +102,8 @@ class KPIDB:
     def batch_import_depts(self, df):
         try:
             current = self.get_df("departments")
+            if current.empty: current = pd.DataFrame(columns=["dept_id", "dept_name", "level", "parent_dept_id"])
+            
             rename_map = {"部門代號": "dept_id", "部門名稱": "dept_name", "層級": "level", "上層代號": "parent_dept_id"}
             df.rename(columns=rename_map, inplace=True)
             combined = pd.concat([current, df], ignore_index=True).drop_duplicates(subset=['dept_id'], keep='last')
@@ -123,12 +123,17 @@ class KPIDB:
             df_tasks['created_at'] = str(date.today())
             df_tasks['approved_at'] = ""
             
-            # 格式化日期
+            # 格式化日期 (確保寫入的是字串)
             df_tasks['start_date'] = df_tasks['start_date'].astype(str)
             df_tasks['end_date'] = df_tasks['end_date'].astype(str)
 
-            # 寫入 (Append)
-            values = df_tasks[['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at']].values.tolist()
+            # 確保欄位順序與 Sheet 一致
+            cols = ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at']
+            # 補齊可能缺失的欄位
+            for c in cols:
+                if c not in df_tasks.columns: df_tasks[c] = ""
+                
+            values = df_tasks[cols].values.tolist()
             self.ws_tasks.append_rows(values)
             return True, f"已新增 {len(values)} 筆任務"
         except Exception as e: return False, str(e)
@@ -189,10 +194,25 @@ class KPIDB:
             c = self.ws_emp.find(email, in_column=1)
             if c:
                 row = self.ws_emp.row_values(c.row)
-                if str(row[2]) == str(password):
-                    return {"role": row[5], "name": row[1], "email": row[0], "manager": row[4]}
+                # Sheet 順序: email, name, password, dept, manager, role
+                # Index: 0, 1, 2, 3, 4, 5
+                if len(row) > 2 and str(row[2]) == str(password):
+                    role_val = row[5] if len(row) > 5 else "user"
+                    manager_val = row[4] if len(row) > 4 else ""
+                    return {"role": role_val, "name": row[1], "email": row[0], "manager": manager_val}
         except: pass
         return None
+
+    # 單筆新增員工 (相容舊功能)
+    def upsert_employee(self, email, name, password, dept, manager, role="user"):
+        # 其實可以用 batch_import_employees 來實作
+        df = pd.DataFrame([{"email": email, "name": name, "password": password, "department": dept, "manager_email": manager, "role": role}])
+        return self.save_employees_from_editor(pd.concat([self.get_df("employees"), df], ignore_index=True).drop_duplicates(subset=['email'], keep='last'))
+
+    def upsert_dept(self, d_id, d_name, level, parent):
+        df = pd.DataFrame([{"dept_id": d_id, "dept_name": d_name, "level": level, "parent_dept_id": parent}])
+        return self.save_depts_from_editor(pd.concat([self.get_df("departments"), df], ignore_index=True).drop_duplicates(subset=['dept_id'], keep='last'))
+
 
 @st.cache_resource
 def get_db(): return KPIDB()
@@ -259,8 +279,10 @@ def admin_page():
                 ne_pwd = c4.text_input("預設密碼", value="1234")
                 ne_mgr = c5.text_input("主管Email")
                 if st.form_submit_button("新增"):
-                    sys.upsert_employee(ne_email, ne_name, ne_pwd, ne_dept, ne_mgr)
-                    st.success("已新增，請重新整理表格"); time.sleep(1); st.rerun()
+                    if ne_email:
+                        sys.upsert_employee(ne_email, ne_name, ne_pwd, ne_dept, ne_mgr)
+                        st.success("已新增"); time.sleep(1); st.rerun()
+                    else: st.error("Email 為必填")
 
         # 2. 表格編輯與刪除
         st.write("▼ 直接在表格修改，勾選「刪除」欄位可移除資料")
@@ -277,8 +299,7 @@ def admin_page():
                     "email": st.column_config.TextColumn(disabled=True) # Email 為 Key 不可改
                 },
                 use_container_width=True,
-                hide_index=True,
-                num_rows="dynamic" # 允許直接在下方新增
+                hide_index=True
             )
             
             if st.button("💾 儲存員工變更", type="primary"):
@@ -306,8 +327,10 @@ def admin_page():
                 c3, c4 = st.columns(2)
                 nd_lv = c3.text_input("層級"); nd_p = c4.text_input("上層代號")
                 if st.form_submit_button("新增"):
-                    sys.upsert_dept(nd_id, nd_name, nd_lv, nd_p)
-                    st.success("已新增"); time.sleep(1); st.rerun()
+                    if nd_id:
+                        sys.upsert_dept(nd_id, nd_name, nd_lv, nd_p)
+                        st.success("已新增"); time.sleep(1); st.rerun()
+                    else: st.error("代號必填")
 
         df_dept = sys.get_df("departments")
         if not df_dept.empty:
