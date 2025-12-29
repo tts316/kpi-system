@@ -10,11 +10,10 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="聯成教育員工KPI考核系統", layout="wide", page_icon="📈")
+st.set_page_config(page_title="聯成教育員工KPI考核系統 (組織管理版)", layout="wide", page_icon="📈")
 
-# Logo URL (來自您提供的圖片)
-LOGO_URL = "https://www.lccnet.com.tw/img/logo.png" 
-# 備註：若您提供的圖片連結失效，可替換為任何公開圖片連結，或改用 st.image("logo.png") 本地檔
+# Logo URL
+LOGO_URL = "https://www.lccnet.com.tw/img/logo.png"
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
 
@@ -61,10 +60,15 @@ class KPIDB:
                 if ws:
                     data = ws.get_all_records()
                     df = pd.DataFrame(data)
+                    # 資料清洗與防呆
                     if table_name == "tasks" and not df.empty:
                         df['owner_email'] = df['owner_email'].astype(str).str.strip().str.lower()
                         df['task_id'] = df['task_id'].astype(str).str.strip()
                         df['status'] = df['status'].astype(str).str.strip()
+                    if table_name == "employees" and not df.empty:
+                        df['email'] = df['email'].astype(str).str.strip().str.lower()
+                        df['manager_email'] = df['manager_email'].astype(str).str.strip().str.lower()
+
                     if df.empty and table_name in defaults: return pd.DataFrame(columns=defaults[table_name])
                     if table_name == "tasks" and "task_id" not in df.columns:
                         ws.clear(); ws.append_row(defaults["tasks"])
@@ -108,6 +112,7 @@ class KPIDB:
             
             current_vals = self.ws_tasks.get_all_values()
             if not current_vals: self.ws_tasks.append_row(cols)
+                
             values = df_tasks[cols].values.tolist()
             self.ws_tasks.append_rows(values)
             return True, f"已新增 {len(values)} 筆任務"
@@ -273,14 +278,12 @@ def calc_expected_progress(start_str, end_str):
         return int(((today - s).days / total) * 100)
     except: return 0
 
-# --- Helper Functions ---
 def get_full_team_emails(manager_email, df_emp):
     l1 = df_emp[df_emp['manager_email'] == manager_email]['email'].tolist()
     l2 = df_emp[df_emp['manager_email'].isin(l1)]['email'].tolist()
     return list(set(l1 + l2))
 
 # --- UI Components ---
-
 def change_password_ui(role, email):
     with st.expander("🔑 修改密碼"):
         new_p = st.text_input("新密碼", type="password", key="new_p")
@@ -293,7 +296,6 @@ def change_password_ui(role, email):
             else: st.error("密碼不一致或為空")
 
 # --- 共用模組：個人任務功能 ---
-# 為了讓主管和員工共用這塊功能，將其獨立為函式
 def render_personal_task_module(user):
     # Session State for batch editor data
     if 'batch_df' not in st.session_state:
@@ -466,10 +468,9 @@ def render_personal_task_module(user):
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
 
-# --- Login & Main Pages ---
-
+# --- UI Pages ---
 def login_page():
-    st.markdown("## 📈 聯成教育員工KPI考核系統")
+    st.markdown("## 📈 員工點數制 KPI 系統")
     col1, col2 = st.columns(2)
     with col1:
         email_input = st.text_input("帳號 (Email)")
@@ -547,36 +548,27 @@ def admin_page():
                 sys.batch_import_depts(pd.read_excel(up_d))
                 st.success("匯入完成"); st.rerun()
 
-def employee_page():
-    user = st.session_state.user
-    st.header(f"👋 {user['name']}")
-    change_password_ui("user", user['email'])
-    # 直接調用共用模組
-    render_personal_task_module(user)
-
 def manager_page():
     user = st.session_state.user
-    
-    df_emp = sys.get_df("employees")
-    df_tasks = sys.get_df("tasks")
-    
-    # 待辦提醒
-    l1_emails = df_emp[df_emp['manager_email'] == user['email']]['email'].tolist()
-    pending = df_tasks[df_tasks['owner_email'].isin(l1_emails) & (df_tasks['status'] == "Submitted")].copy()
-    pending_count = len(pending)
-    if pending_count > 0: st.warning(f"🔔 提醒：您有 **{pending_count}** 筆任務等待審核！")
-    else: st.success("✅ 目前沒有待審核任務。")
-
     st.header(f"👨‍💼 主管審核 - {user['name']}")
-    valid_points_map = {"S": [1, 2, 3], "M": [4, 5, 6], "L": [7, 8, 9], "XL": [10, 11, 12]}
+    change_password_ui("user", user['email'])
     
-    # [新增] 側邊欄切換功能：管理部屬 / 個人任務
+    # 主管選單切換
     mgr_menu = st.sidebar.radio("主管選單", ["👥 團隊審核與報表", "📝 個人任務管理"])
     
     if mgr_menu == "📝 個人任務管理":
         render_personal_task_module(user)
     else:
-        # 原有的主管審核介面
+        df_emp = sys.get_df("employees")
+        df_tasks = sys.get_df("tasks")
+        l1_emails = df_emp[df_emp['manager_email'] == user['email']]['email'].tolist()
+        pending = df_tasks[df_tasks['owner_email'].isin(l1_emails) & (df_tasks['status'] == "Submitted")].copy()
+        
+        pending_count = len(pending)
+        if pending_count > 0: st.warning(f"🔔 提醒：您有 **{pending_count}** 筆任務等待審核！")
+        else: st.success("✅ 目前沒有待審核任務。")
+
+        valid_points_map = {"S": [1, 2, 3], "M": [4, 5, 6], "L": [7, 8, 9], "XL": [10, 11, 12]}
         t1, t2 = st.tabs(["✅ 待審核", "📊 團隊總表"])
         
         with t1:
@@ -664,21 +656,14 @@ def manager_page():
 
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
-
-# Logo 顯示 (側邊欄頂部)
 with st.sidebar:
-    # 使用 container 讓 Logo 居中或美觀
-    st.image(LOGO_URL, use_column_width=True)
-    st.divider()
-
-if st.session_state.user is None:
-    login_page()
+    st.image(LOGO_URL, use_column_width=True); st.divider()
+if st.session_state.user is None: login_page()
 else:
     role = st.session_state.user['role']
     with st.sidebar:
         st.write(f"👤 {st.session_state.user['name']}")
         if st.button("登出"): st.session_state.user = None; st.rerun()
-    
     if role == "admin": admin_page()
     else:
         df_emp = sys.get_df("employees")
