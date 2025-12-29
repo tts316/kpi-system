@@ -313,6 +313,7 @@ def change_password_ui(role, email):
                 else: st.error(msg)
             else: st.error("密碼不一致或為空")
 
+# --- 共用模組：個人任務功能 ---
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
@@ -483,7 +484,6 @@ def render_personal_task_module(user):
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
 
-# --- UI Pages (Admin) ---
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
@@ -522,7 +522,6 @@ def admin_page():
             if up and st.button("確認匯入"):
                 sys.batch_import_employees(pd.read_excel(up))
                 st.success("匯入完成"); st.rerun()
-    
     with tab2:
         st.subheader("組織資料維護")
         with st.expander("➕ 單筆新增部門"):
@@ -691,7 +690,6 @@ def manager_page():
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
 
-# Logo 顯示 (側邊欄頂部)
 logo_data = sys.get_setting("logo")
 with st.sidebar:
     if logo_data:
@@ -703,20 +701,15 @@ with st.sidebar:
         except: pass
     st.divider()
 
-# Login Page
-def login_page():
-    st.markdown("## 📈 員工點數制 KPI 系統")
-    col1, col2 = st.columns(2)
-    with col1:
-        email_input = st.text_input("帳號 (Email)")
-        password = st.text_input("密碼", type="password")
-        if st.button("登入", type="primary"):
-            user = sys.verify_user(email_input, password)
-            if user:
-                st.session_state.user = user
-                st.rerun()
-            else: st.error("帳號或密碼錯誤")
+# [關鍵補回] 員工介面函式
+def employee_page():
+    user = st.session_state.user
+    st.header(f"👋 {user['name']}")
+    change_password_ui("user", user['email'])
+    # 直接調用共用模組
+    render_personal_task_module(user)
 
+# Main Login Logic
 if st.session_state.user is None:
     login_page()
 else:
@@ -724,6 +717,7 @@ else:
     with st.sidebar:
         st.write(f"👤 {st.session_state.user['name']}")
         if st.button("登出"): st.session_state.user = None; st.rerun()
+    
     if role == "admin": admin_page()
     else:
         df_emp = sys.get_df("employees")
