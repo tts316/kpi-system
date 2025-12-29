@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="聯成教育員工KPI考核系統 (Logo自訂版)", layout="wide", page_icon="📈")
+st.set_page_config(page_title="聯成教育員工KPI考核系統", layout="wide", page_icon="📈")
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
 
@@ -38,7 +38,7 @@ class KPIDB:
             self.ws_dept = self.sh.worksheet("departments")
             self.ws_tasks = self.sh.worksheet("tasks")
             self.ws_admin = self.sh.worksheet("system_admin")
-            self.ws_settings = self.sh.worksheet("system_settings") # 新增設定檔
+            self.ws_settings = self.sh.worksheet("system_settings")
         except Exception as e:
             st.error(f"連線失敗: {e}")
             st.stop()
@@ -61,7 +61,7 @@ class KPIDB:
                 if ws:
                     data = ws.get_all_records()
                     df = pd.DataFrame(data)
-                    # 資料清洗
+                    
                     if table_name == "tasks" and not df.empty:
                         df['owner_email'] = df['owner_email'].astype(str).str.strip().str.lower()
                         df['task_id'] = df['task_id'].astype(str).str.strip()
@@ -85,7 +85,7 @@ class KPIDB:
             return True, "更新成功"
         except Exception as e: return False, str(e)
 
-    # --- Logo 存取功能 ---
+    # --- Logo 設定存取 ---
     def get_setting(self, key):
         try:
             cell = self.ws_settings.find(key, in_column=1)
@@ -96,7 +96,12 @@ class KPIDB:
 
     def update_setting(self, key, value):
         try:
-            cell = self.ws_settings.find(key, in_column=1)
+            try:
+                cell = self.ws_settings.find(key, in_column=1)
+            except:
+                time.sleep(1)
+                cell = self.ws_settings.find(key, in_column=1)
+                
             if cell:
                 self.ws_settings.update_cell(cell.row, 2, value)
             else:
@@ -133,7 +138,6 @@ class KPIDB:
             
             current_vals = self.ws_tasks.get_all_values()
             if not current_vals: self.ws_tasks.append_row(cols)
-                
             values = df_tasks[cols].values.tolist()
             self.ws_tasks.append_rows(values)
             return True, f"已新增 {len(values)} 筆任務"
@@ -316,7 +320,6 @@ def change_password_ui(role, email):
                 else: st.error(msg)
             else: st.error("密碼不一致或為空")
 
-# --- 共用模組：個人任務 ---
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
@@ -356,7 +359,6 @@ def render_personal_task_module(user):
                 st.dataframe(drafts[['task_name', 'start_date', 'end_date', 'size', 'description']], hide_index=True)
                 draft_opts = [f"{r['task_name']} ({r['task_id']})" for i, r in drafts.iterrows()]
                 selected_drafts = st.multiselect("勾選任務進行操作", draft_opts)
-                
                 c1, c2, c3 = st.columns(3)
                 if c1.button("🚀 送出審核 (選取項目)"):
                     updates = []
@@ -366,7 +368,6 @@ def render_personal_task_module(user):
                     if updates:
                         sys.batch_update_tasks_status(updates)
                         st.success("已送出審核"); time.sleep(1); st.rerun()
-                
                 if c2.button("✏️ 帶入批次編輯 (並刪除原暫存)"):
                     load_data = []
                     ids_to_del = []
@@ -426,7 +427,6 @@ def render_personal_task_module(user):
 
     with t2:
         st.subheader("批次新增任務")
-        # --- [新增] 使用 checkbox 來做選擇 (不使用 Select 欄位) ---
         edited_tasks = st.data_editor(
             st.session_state.batch_df,
             column_config={
@@ -438,27 +438,23 @@ def render_personal_task_module(user):
             },
             num_rows="dynamic", use_container_width=True, key=f"task_editor_{st.session_state.editor_key}"
         )
-        
         c1, c2 = st.columns(2)
-        # 這裡的邏輯改為：直接儲存「所有有填寫的列」
-        if c1.button("💾 全部儲存為暫存 (Draft)", type="secondary"):
+        if c1.button("💾 儲存為暫存 (Draft)", type="secondary"):
             valid_tasks = edited_tasks[edited_tasks['task_name'] != ""]
             if not valid_tasks.empty:
                 valid_tasks['owner_email'] = user['email']
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Draft")
                 if succ: st.success(msg); reset_editor(); time.sleep(1); st.rerun()
                 else: st.error(msg)
-            else: st.warning("請至少填寫一筆任務")
-
-        if c2.button("🚀 全部送出審核 (Submit)", type="primary"):
+            else: st.warning("請填寫任務")
+        if c2.button("🚀 送出審核 (Submit)", type="primary"):
             valid_tasks = edited_tasks[edited_tasks['task_name'] != ""]
             if not valid_tasks.empty:
                 valid_tasks['owner_email'] = user['email']
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Submitted")
                 if succ: st.success(msg); reset_editor(); time.sleep(1); st.rerun()
                 else: st.error(msg)
-            else: st.warning("請至少填寫一筆任務")
-        
+            else: st.warning("請填寫任務")
         st.divider()
         with st.expander("📂 Excel 匯入任務"):
             sample_task = pd.DataFrame([{"任務名稱": "專案A", "說明": "開發", "開始日期": "2025-01-01", "結束日期": "2025-01-31", "大小": "M"}])
@@ -493,7 +489,10 @@ def render_personal_task_module(user):
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
-    tab1, tab2 = st.tabs(["👥 員工管理", "🏢 組織圖"])
+    
+    # [修正] 補上系統設定頁籤
+    tab1, tab2, tab3 = st.tabs(["👥 員工管理", "🏢 組織圖", "⚙️ 系統設定"])
+    
     with tab1:
         st.subheader("員工資料維護")
         with st.expander("➕ 單筆新增員工"):
@@ -555,6 +554,37 @@ def admin_page():
             if up_d and st.button("確認匯入組織"):
                 sys.batch_import_depts(pd.read_excel(up_d))
                 st.success("匯入完成"); st.rerun()
+    with tab3:
+        st.subheader("⚙️ 系統設定")
+        st.write("設定公司 Logo (圖片)")
+        
+        current_logo = sys.get_setting("logo")
+        if current_logo:
+            st.image(current_logo, width=200, caption="目前 Logo")
+        
+        up_logo = st.file_uploader("上傳新 Logo (建議 < 50KB)", type=["png", "jpg", "jpeg"])
+        if up_logo:
+            if st.button("上傳並儲存"):
+                try:
+                    bytes_data = up_logo.getvalue()
+                    base64_str = base64.b64encode(bytes_data).decode()
+                    full_str = f"data:image/png;base64,{base64_str}"
+                    # 檢查大小
+                    if len(full_str) > 50000:
+                        st.error("圖片過大 (超過 50,000 字元)，請壓縮後再試，或使用 URL 方式。")
+                    else:
+                        sys.update_setting("logo", full_str)
+                        st.success("Logo 已更新！"); time.sleep(1); st.rerun()
+                except Exception as e:
+                    st.error(f"處理失敗: {e}")
+        
+        st.divider()
+        st.write("或輸入 Logo 圖片網址 (URL)")
+        logo_url = st.text_input("圖片連結", placeholder="https://example.com/logo.png")
+        if st.button("儲存 URL"):
+            if logo_url:
+                sys.update_setting("logo", logo_url)
+                st.success("Logo URL 已更新"); time.sleep(1); st.rerun()
 
 def manager_page():
     user = st.session_state.user
@@ -664,24 +694,15 @@ def manager_page():
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
 
-# Logo
 logo_data = sys.get_setting("logo")
 with st.sidebar:
     if logo_data:
         try:
-            # 判斷是 URL 還是 Base64
-            if logo_data.startswith("http"):
-                st.image(logo_data, use_column_width=True)
+            if logo_data.startswith("http"): st.image(logo_data, use_column_width=True)
             else:
-                # 嘗試 Base64 解碼
-                # 需要補上前綴 data:image/png;base64,
-                if not logo_data.startswith("data:image"):
-                    logo_data = f"data:image/png;base64,{logo_data}"
+                if not logo_data.startswith("data:image"): logo_data = f"data:image/png;base64,{logo_data}"
                 st.image(logo_data, use_column_width=True)
-        except:
-            pass # 格式錯誤則不顯示
-    else:
-        st.write("NO LOGO")
+        except: pass
     st.divider()
 
 if st.session_state.user is None:
@@ -691,7 +712,6 @@ else:
     with st.sidebar:
         st.write(f"👤 {st.session_state.user['name']}")
         if st.button("登出"): st.session_state.user = None; st.rerun()
-    
     if role == "admin": admin_page()
     else:
         df_emp = sys.get_df("employees")
