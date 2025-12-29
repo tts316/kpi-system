@@ -38,7 +38,7 @@ class KPIDB:
             self.ws_dept = self.sh.worksheet("departments")
             self.ws_tasks = self.sh.worksheet("tasks")
             self.ws_admin = self.sh.worksheet("system_admin")
-            self.ws_settings = self.sh.worksheet("system_settings") # 設定檔
+            self.ws_settings = self.sh.worksheet("system_settings")
         except Exception as e:
             st.error(f"連線失敗: {e}")
             st.stop()
@@ -85,7 +85,6 @@ class KPIDB:
             return True, "更新成功"
         except Exception as e: return False, str(e)
 
-    # --- Logo 設定 ---
     def get_setting(self, key):
         try:
             cell = self.ws_settings.find(key, in_column=1)
@@ -488,7 +487,6 @@ def render_personal_task_module(user):
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
-    # [修正] 補回 3 個 Tab
     tab1, tab2, tab3 = st.tabs(["👥 員工管理", "🏢 組織圖", "⚙️ 系統設定"])
     
     with tab1:
@@ -554,7 +552,6 @@ def admin_page():
                 sys.batch_import_depts(pd.read_excel(up_d))
                 st.success("匯入完成"); st.rerun()
 
-    # [新增] 系統設定 Tab
     with tab3:
         st.subheader("⚙️ 系統設定")
         st.write("設定公司 Logo (圖片)")
@@ -694,6 +691,7 @@ def manager_page():
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
 
+# Logo 顯示 (側邊欄頂部)
 logo_data = sys.get_setting("logo")
 with st.sidebar:
     if logo_data:
@@ -704,6 +702,20 @@ with st.sidebar:
                 st.image(logo_data, use_column_width=True)
         except: pass
     st.divider()
+
+# Login Page
+def login_page():
+    st.markdown("## 📈 員工點數制 KPI 系統")
+    col1, col2 = st.columns(2)
+    with col1:
+        email_input = st.text_input("帳號 (Email)")
+        password = st.text_input("密碼", type="password")
+        if st.button("登入", type="primary"):
+            user = sys.verify_user(email_input, password)
+            if user:
+                st.session_state.user = user
+                st.rerun()
+            else: st.error("帳號或密碼錯誤")
 
 if st.session_state.user is None:
     login_page()
