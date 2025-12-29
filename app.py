@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 import time
 import io
+import base64
 import smtplib
 from email.mime.text import MIMEText
 import gspread
@@ -10,10 +11,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="聯成教育員工KPI考核系統 (組織管理版)", layout="wide", page_icon="📈")
-
-# Logo URL
-LOGO_URL = "https://www.lccnet.com.tw/img/logo.png"
+st.set_page_config(page_title="聯成教育員工KPI考核系統 (Logo自訂版)", layout="wide", page_icon="📈")
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
 
@@ -40,6 +38,7 @@ class KPIDB:
             self.ws_dept = self.sh.worksheet("departments")
             self.ws_tasks = self.sh.worksheet("tasks")
             self.ws_admin = self.sh.worksheet("system_admin")
+            self.ws_settings = self.sh.worksheet("system_settings") # 新增設定檔
         except Exception as e:
             st.error(f"連線失敗: {e}")
             st.stop()
@@ -48,7 +47,8 @@ class KPIDB:
         defaults = {
             "tasks": ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at'],
             "employees": ["email", "name", "password", "department", "manager_email", "role"],
-            "departments": ["dept_id", "dept_name", "level", "parent_dept_id"]
+            "departments": ["dept_id", "dept_name", "level", "parent_dept_id"],
+            "system_settings": ["key", "value"]
         }
         for i in range(3):
             try:
@@ -56,11 +56,12 @@ class KPIDB:
                 if table_name == "employees": ws = self.ws_emp
                 elif table_name == "departments": ws = self.ws_dept
                 elif table_name == "tasks": ws = self.ws_tasks
+                elif table_name == "system_settings": ws = self.ws_settings
                 
                 if ws:
                     data = ws.get_all_records()
                     df = pd.DataFrame(data)
-                    # 資料清洗與防呆
+                    # 資料清洗
                     if table_name == "tasks" and not df.empty:
                         df['owner_email'] = df['owner_email'].astype(str).str.strip().str.lower()
                         df['task_id'] = df['task_id'].astype(str).str.strip()
@@ -84,6 +85,26 @@ class KPIDB:
             return True, "更新成功"
         except Exception as e: return False, str(e)
 
+    # --- Logo 存取功能 ---
+    def get_setting(self, key):
+        try:
+            cell = self.ws_settings.find(key, in_column=1)
+            if cell:
+                return self.ws_settings.cell(cell.row, 2).value
+            return None
+        except: return None
+
+    def update_setting(self, key, value):
+        try:
+            cell = self.ws_settings.find(key, in_column=1)
+            if cell:
+                self.ws_settings.update_cell(cell.row, 2, value)
+            else:
+                self.ws_settings.append_row([key, value])
+            return True, "設定已更新"
+        except Exception as e: return False, str(e)
+
+    # --- 既有功能 ---
     def batch_add_tasks(self, df_tasks, initial_status="Draft"):
         try:
             for idx, row in df_tasks.iterrows():
@@ -295,9 +316,8 @@ def change_password_ui(role, email):
                 else: st.error(msg)
             else: st.error("密碼不一致或為空")
 
-# --- 共用模組：個人任務功能 ---
+# --- 共用模組：個人任務 ---
 def render_personal_task_module(user):
-    # Session State for batch editor data
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
             "task_name": [""] * 10, "description": [""] * 10,
@@ -354,10 +374,8 @@ def render_personal_task_module(user):
                         tid = item.split("(")[-1].replace(")", "")
                         task_row = drafts[drafts['task_id'].astype(str) == str(tid)].iloc[0]
                         load_data.append({
-                            "task_name": task_row['task_name'],
-                            "description": task_row['description'],
-                            "start_date": pd.to_datetime(task_row['start_date']).date(),
-                            "end_date": pd.to_datetime(task_row['end_date']).date(),
+                            "task_name": task_row['task_name'], "description": task_row['description'],
+                            "start_date": pd.to_datetime(task_row['start_date']).date(), "end_date": pd.to_datetime(task_row['end_date']).date(),
                             "size": task_row['size']
                         })
                         ids_to_del.append(tid)
@@ -384,8 +402,7 @@ def render_personal_task_module(user):
                         st.error(f"主管評語: {r['manager_comment']}")
                         with st.form(f"edit_rej_{r['task_id']}"):
                             st.write("修改後重新送出：")
-                            nn = st.text_input("名稱", value=r['task_name'])
-                            nd = st.text_input("說明", value=r['description'])
+                            nn = st.text_input("名稱", value=r['task_name']); nd = st.text_input("說明", value=r['description'])
                             c1, c2, c3 = st.columns(3)
                             ns = c1.date_input("開始", value=pd.to_datetime(r['start_date'])); ne = c2.date_input("結束", value=pd.to_datetime(r['end_date']))
                             nz = c3.selectbox("大小", ["S","M","L","XL"], index=["S","M","L","XL"].index(r['size']))
@@ -409,6 +426,7 @@ def render_personal_task_module(user):
 
     with t2:
         st.subheader("批次新增任務")
+        # --- [新增] 使用 checkbox 來做選擇 (不使用 Select 欄位) ---
         edited_tasks = st.data_editor(
             st.session_state.batch_df,
             column_config={
@@ -420,23 +438,27 @@ def render_personal_task_module(user):
             },
             num_rows="dynamic", use_container_width=True, key=f"task_editor_{st.session_state.editor_key}"
         )
+        
         c1, c2 = st.columns(2)
-        if c1.button("💾 儲存為暫存 (Draft)", type="secondary"):
+        # 這裡的邏輯改為：直接儲存「所有有填寫的列」
+        if c1.button("💾 全部儲存為暫存 (Draft)", type="secondary"):
             valid_tasks = edited_tasks[edited_tasks['task_name'] != ""]
             if not valid_tasks.empty:
                 valid_tasks['owner_email'] = user['email']
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Draft")
                 if succ: st.success(msg); reset_editor(); time.sleep(1); st.rerun()
                 else: st.error(msg)
-            else: st.warning("請填寫任務")
-        if c2.button("🚀 送出審核 (Submit)", type="primary"):
+            else: st.warning("請至少填寫一筆任務")
+
+        if c2.button("🚀 全部送出審核 (Submit)", type="primary"):
             valid_tasks = edited_tasks[edited_tasks['task_name'] != ""]
             if not valid_tasks.empty:
                 valid_tasks['owner_email'] = user['email']
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Submitted")
                 if succ: st.success(msg); reset_editor(); time.sleep(1); st.rerun()
                 else: st.error(msg)
-            else: st.warning("請填寫任務")
+            else: st.warning("請至少填寫一筆任務")
+        
         st.divider()
         with st.expander("📂 Excel 匯入任務"):
             sample_task = pd.DataFrame([{"任務名稱": "專案A", "說明": "開發", "開始日期": "2025-01-01", "結束日期": "2025-01-31", "大小": "M"}])
@@ -467,20 +489,6 @@ def render_personal_task_module(user):
     with t3:
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
-
-# --- UI Pages ---
-def login_page():
-    st.markdown("## 📈 員工點數制 KPI 系統")
-    col1, col2 = st.columns(2)
-    with col1:
-        email_input = st.text_input("帳號 (Email)")
-        password = st.text_input("密碼", type="password")
-        if st.button("登入", type="primary"):
-            user = sys.verify_user(email_input, password)
-            if user:
-                st.session_state.user = user
-                st.rerun()
-            else: st.error("帳號或密碼錯誤")
 
 def admin_page():
     st.header("🔧 管理後台")
@@ -553,7 +561,6 @@ def manager_page():
     st.header(f"👨‍💼 主管審核 - {user['name']}")
     change_password_ui("user", user['email'])
     
-    # 主管選單切換
     mgr_menu = st.sidebar.radio("主管選單", ["👥 團隊審核與報表", "📝 個人任務管理"])
     
     if mgr_menu == "📝 個人任務管理":
@@ -656,14 +663,35 @@ def manager_page():
 
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
+
+# Logo
+logo_data = sys.get_setting("logo")
 with st.sidebar:
-    st.image(LOGO_URL, use_column_width=True); st.divider()
-if st.session_state.user is None: login_page()
+    if logo_data:
+        try:
+            # 判斷是 URL 還是 Base64
+            if logo_data.startswith("http"):
+                st.image(logo_data, use_column_width=True)
+            else:
+                # 嘗試 Base64 解碼
+                # 需要補上前綴 data:image/png;base64,
+                if not logo_data.startswith("data:image"):
+                    logo_data = f"data:image/png;base64,{logo_data}"
+                st.image(logo_data, use_column_width=True)
+        except:
+            pass # 格式錯誤則不顯示
+    else:
+        st.write("NO LOGO")
+    st.divider()
+
+if st.session_state.user is None:
+    login_page()
 else:
     role = st.session_state.user['role']
     with st.sidebar:
         st.write(f"👤 {st.session_state.user['name']}")
         if st.button("登出"): st.session_state.user = None; st.rerun()
+    
     if role == "admin": admin_page()
     else:
         df_emp = sys.get_df("employees")
