@@ -313,7 +313,23 @@ def change_password_ui(role, email):
                 else: st.error(msg)
             else: st.error("密碼不一致或為空")
 
-# --- 共用模組：個人任務功能 ---
+# --- 頁面函式定義 ---
+
+# 1. 登入頁
+def login_page():
+    st.markdown("## 📈 聯成教育員工KPI考核系統")
+    col1, col2 = st.columns(2)
+    with col1:
+        email_input = st.text_input("帳號 (Email)")
+        password = st.text_input("密碼", type="password")
+        if st.button("登入", type="primary"):
+            user = sys.verify_user(email_input, password)
+            if user:
+                st.session_state.user = user
+                st.rerun()
+            else: st.error("帳號或密碼錯誤")
+
+# 2. 共用模組：個人任務功能
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
@@ -371,10 +387,8 @@ def render_personal_task_module(user):
                         tid = item.split("(")[-1].replace(")", "")
                         task_row = drafts[drafts['task_id'].astype(str) == str(tid)].iloc[0]
                         load_data.append({
-                            "task_name": task_row['task_name'],
-                            "description": task_row['description'],
-                            "start_date": pd.to_datetime(task_row['start_date']).date(),
-                            "end_date": pd.to_datetime(task_row['end_date']).date(),
+                            "task_name": task_row['task_name'], "description": task_row['description'],
+                            "start_date": pd.to_datetime(task_row['start_date']).date(), "end_date": pd.to_datetime(task_row['end_date']).date(),
                             "size": task_row['size']
                         })
                         ids_to_del.append(tid)
@@ -484,6 +498,7 @@ def render_personal_task_module(user):
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
 
+# 3. 管理員頁面
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
@@ -582,6 +597,15 @@ def admin_page():
                 sys.update_setting("logo", logo_url)
                 st.success("Logo URL 已更新"); time.sleep(1); st.rerun()
 
+# 4. 員工介面
+def employee_page():
+    user = st.session_state.user
+    st.header(f"👋 {user['name']}")
+    change_password_ui("user", user['email'])
+    # 直接調用共用模組
+    render_personal_task_module(user)
+
+# 5. 主管介面
 def manager_page():
     user = st.session_state.user
     st.header(f"👨‍💼 主管審核 - {user['name']}")
@@ -701,15 +725,6 @@ with st.sidebar:
         except: pass
     st.divider()
 
-# [關鍵補回] 員工介面函式
-def employee_page():
-    user = st.session_state.user
-    st.header(f"👋 {user['name']}")
-    change_password_ui("user", user['email'])
-    # 直接調用共用模組
-    render_personal_task_module(user)
-
-# Main Login Logic
 if st.session_state.user is None:
     login_page()
 else:
