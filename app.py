@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="員工KPI考核系統 (最終結構版)", layout="wide", page_icon="📈")
+st.set_page_config(page_title="員工KPI考核系統 (資料同步版)", layout="wide", page_icon="📈")
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
 
@@ -57,12 +57,17 @@ class KPIDB:
                 if ws:
                     data = ws.get_all_records()
                     df = pd.DataFrame(data)
-                    # [修正] 強制轉換欄位型別，避免 int/str 混淆導致篩選失敗
-                    if table_name == "tasks" and not df.empty:
-                        df['owner_email'] = df['owner_email'].astype(str).str.strip()
-                        df['task_id'] = df['task_id'].astype(str).str.strip()
-                        df['status'] = df['status'].astype(str).str.strip()
                     
+                    # [關鍵修正] 強制資料清洗：轉字串、小寫、去空白
+                    if not df.empty:
+                        if table_name == "tasks":
+                            df['owner_email'] = df['owner_email'].astype(str).str.strip().str.lower()
+                            df['task_id'] = df['task_id'].astype(str).str.strip()
+                            df['status'] = df['status'].astype(str).str.strip()
+                        if table_name == "employees":
+                            df['email'] = df['email'].astype(str).str.strip().str.lower()
+                            df['manager_email'] = df['manager_email'].astype(str).str.strip().str.lower()
+
                     if df.empty and table_name in defaults: return pd.DataFrame(columns=defaults[table_name])
                     if table_name == "tasks" and "task_id" not in df.columns:
                         ws.clear(); ws.append_row(defaults["tasks"])
@@ -88,7 +93,6 @@ class KPIDB:
                 except: return False, f"錯誤: 任務 '{row['task_name']}' 日期格式錯誤"
 
             base_id = int(time.time())
-            # 確保 ID 唯一性
             df_tasks['task_id'] = [f"{base_id}_{i}_{int(time.time()*1000)%1000}" for i in range(len(df_tasks))]
             
             df_tasks['points'] = 0
@@ -99,19 +103,23 @@ class KPIDB:
             df_tasks['created_at'] = str(date.today())
             df_tasks['approved_at'] = ""
             
-            # [修正] 強制轉字串並去空白，確保寫入資料庫是乾淨的
-            df_tasks['owner_email'] = df_tasks['owner_email'].astype(str).str.strip()
+            # [修正] 寫入時強制小寫
+            df_tasks['owner_email'] = df_tasks['owner_email'].astype(str).str.strip().str.lower()
             df_tasks['start_date'] = df_tasks['start_date'].astype(str)
             df_tasks['end_date'] = df_tasks['end_date'].astype(str)
 
             cols = ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at']
+            # 確保欄位存在
             for c in cols:
                 if c not in df_tasks.columns: df_tasks[c] = ""
             
+            # 只選取標準欄位寫入
+            final_df = df_tasks[cols]
+
             current_vals = self.ws_tasks.get_all_values()
             if not current_vals: self.ws_tasks.append_row(cols)
                 
-            values = df_tasks[cols].values.tolist()
+            values = final_df.values.tolist()
             self.ws_tasks.append_rows(values)
             return True, f"已新增 {len(values)} 筆任務"
         except Exception as e: return False, str(e)
@@ -138,9 +146,7 @@ class KPIDB:
     def batch_update_tasks_status(self, updates_list):
         try:
             all_tasks = self.get_df("tasks")
-            # 強制轉型
             all_tasks['task_id'] = all_tasks['task_id'].astype(str).str.strip()
-            
             task_map = {str(r['task_id']): i for i, r in all_tasks.iterrows()}
             count = 0
             for up in updates_list:
@@ -202,7 +208,8 @@ class KPIDB:
         except Exception as e: return False, str(e)
 
     def verify_user(self, email, password):
-        email = str(email).strip() # 登入時強制去除空白
+        # [修正] 驗證時也強制轉小寫去空白
+        email = str(email).strip().lower()
         if email == "admin":
             try:
                 c = self.ws_admin.find("admin")
@@ -216,12 +223,14 @@ class KPIDB:
                 if len(row) > 2 and str(row[2]) == str(password):
                     role_val = row[5] if len(row) > 5 else "user"
                     manager_val = row[4] if len(row) > 4 else ""
-                    # [修正] 確保回傳的 Email 也是乾淨的
-                    return {"role": role_val, "name": row[1], "email": str(row[0]).strip(), "manager": manager_val}
+                    return {"role": role_val, "name": row[1], "email": str(row[0]).strip().lower(), "manager": manager_val}
         except: pass
         return None
 
     def upsert_employee(self, email, name, password, dept, manager, role="user"):
+        # 寫入時強制小寫
+        email = str(email).strip().lower()
+        manager = str(manager).strip().lower()
         df = pd.DataFrame([{"email": email, "name": name, "password": password, "department": dept, "manager_email": manager, "role": role}])
         return self.save_employees_from_editor(pd.concat([self.get_df("employees"), df], ignore_index=True).drop_duplicates(subset=['email'], keep='last'))
 
@@ -230,8 +239,9 @@ class KPIDB:
         for c in cols: 
             if c not in df_new.columns: df_new[c] = ""
         df_new = df_new[cols].astype(str)
-        # 強制小寫或去空
-        df_new['email'] = df_new['email'].str.strip()
+        # 強制小寫
+        df_new['email'] = df_new['email'].str.strip().str.lower()
+        df_new['manager_email'] = df_new['manager_email'].str.strip().str.lower()
         return self.batch_update_sheet(self.ws_emp, df_new, "email")
 
     def batch_import_employees(self, df):
@@ -401,51 +411,49 @@ def employee_page():
     st.header(f"👋 {user['name']}")
     change_password_ui("user", user['email'])
     
-    # 編輯器狀態初始化
+    # Session State for batch editor data
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
             "task_name": [""] * 10, "description": [""] * 10,
             "start_date": [date.today()] * 10, "end_date": [date.today() + timedelta(days=7)] * 10,
-            "size": ["M"] * 10
+            "size": ["M"] * 10,
+            "Select": [False] * 10 # 加入勾選欄位
         })
     if 'editor_key' not in st.session_state:
         st.session_state.editor_key = 0
 
-    # 重置編輯器函式 (重要：更新 editor_key 以強制重繪元件)
+    # 重置函式
     def reset_editor():
         st.session_state.batch_df = pd.DataFrame({
             "task_name": [""] * 10, "description": [""] * 10,
             "start_date": [date.today()] * 10, "end_date": [date.today() + timedelta(days=7)] * 10,
-            "size": ["M"] * 10
+            "size": ["M"] * 10,
+            "Select": [False] * 10
         })
         st.session_state.editor_key += 1
 
-    # [關鍵修改] 側邊欄切換
-    menu_options = ["📝 我的任務清單", "➕ 批次新增任務", "📖 相關辦法"]
-    menu = st.sidebar.radio("功能選單", menu_options)
+    tab1, tab2, tab3 = st.tabs(["📝 任務列表", "➕ 批次新增任務", "📖 相關辦法"])
 
-    if menu == "📝 我的任務清單":
+    with tab1:
         st.subheader("我的任務清單")
         df_tasks = sys.get_df("tasks")
         
         if df_tasks.empty:
             st.info("尚無任何任務")
         else:
-            # 篩選我的任務 (確保型別一致)
-            my_email = str(user['email']).strip()
-            df_tasks['owner_email'] = df_tasks['owner_email'].astype(str).str.strip()
+            # 強制轉換欄位類型
+            my_email = str(user['email']).strip().lower()
+            df_tasks['owner_email'] = df_tasks['owner_email'].astype(str).str.strip().str.lower()
             my_tasks = df_tasks[df_tasks['owner_email'] == my_email].copy()
             
-            # 分類
             drafts = my_tasks[my_tasks['status'] == 'Draft']
             submitted = my_tasks[my_tasks['status'] == 'Submitted']
             approved = my_tasks[my_tasks['status'] == 'Approved']
             rejected = my_tasks[my_tasks['status'] == 'Rejected']
 
-            # 1. 暫存區
+            # 1. 暫存區 (Draft)
             st.markdown("### 💾 暫存任務")
             if not drafts.empty:
-                # 顯示簡易表格
                 st.dataframe(drafts[['task_name', 'start_date', 'end_date', 'size', 'description']], hide_index=True)
                 
                 draft_opts = [f"{r['task_name']} ({r['task_id']})" for i, r in drafts.iterrows()]
@@ -475,20 +483,18 @@ def employee_page():
                             "description": task_row['description'],
                             "start_date": pd.to_datetime(task_row['start_date']).date(),
                             "end_date": pd.to_datetime(task_row['end_date']).date(),
-                            "size": task_row['size']
+                            "size": task_row['size'],
+                            "Select": True
                         })
                         ids_to_del.append(tid)
                     
                     if load_data:
                         # 補滿10行
                         while len(load_data) < 10:
-                            load_data.append({"task_name": "", "description": "", "start_date": date.today(), "end_date": date.today()+timedelta(days=7), "size": "M"})
+                            load_data.append({"task_name": "", "description": "", "start_date": date.today(), "end_date": date.today()+timedelta(days=7), "size": "M", "Select": False})
                         
-                        # 更新 Session 並強制重置 Key
                         st.session_state.batch_df = pd.DataFrame(load_data)
                         st.session_state.editor_key += 1
-                        
-                        # 刪除 DB 中的舊資料
                         sys.delete_batch_tasks_by_ids(ids_to_del)
                         
                         st.success("已載入並刪除舊資料，請切換至「批次新增任務」頁籤"); time.sleep(2); st.rerun()
@@ -527,14 +533,9 @@ def employee_page():
                             new_end = c2.date_input("結束", value=pd.to_datetime(r['end_date']))
                             new_size = c3.selectbox("大小", ["S","M","L","XL"], index=["S","M","L","XL"].index(r['size']))
                             
-                            col_sub, col_del = st.columns(2)
-                            if col_sub.form_submit_button("🚀 修改並重送"):
+                            if st.form_submit_button("🚀 修改並重送"):
                                 sys.update_task_content(r['task_id'], new_name, new_desc, new_start, new_end, new_size, "Submitted")
                                 st.success("已重送"); time.sleep(1); st.rerun()
-                            
-                            if col_del.form_submit_button("🗑️ 刪除此任務"):
-                                sys.delete_task(r['task_id'])
-                                st.success("已刪除"); time.sleep(1); st.rerun()
 
             if not approved.empty:
                 for i, r in approved.iterrows():
@@ -551,14 +552,15 @@ def employee_page():
                                 sys.update_progress(r['task_id'], np, nd)
                                 st.rerun()
 
-    elif menu == "➕ 批次新增任務":
+    with tab2:
         st.subheader("批次新增任務")
-        st.markdown("填寫完畢後，可選擇 **「僅暫存」** 或 **「送出審核」**。")
+        st.markdown("填寫完畢後，勾選最左側 **Select** 欄位，再選擇 **「暫存」** 或 **「送審」**。")
         
-        # [關鍵修改] 使用動態 Key 綁定編輯器
-        edited_tasks = st.data_editor(
+        # [關鍵修改] 這裡要接住 data_editor 的回傳值，並寫回 session_state
+        edited_df = st.data_editor(
             st.session_state.batch_df,
             column_config={
+                "Select": st.column_config.CheckboxColumn("選取", default=False),
                 "task_name": "任務名稱",
                 "description": st.column_config.TextColumn("說明 (50字內)", max_chars=50),
                 "start_date": st.column_config.DateColumn("開始日"),
@@ -567,34 +569,45 @@ def employee_page():
             },
             num_rows="dynamic",
             use_container_width=True,
-            key=f"task_editor_{st.session_state.editor_key}" # 每次 Key 改變都會重置元件
+            key=f"task_editor_{st.session_state.editor_key}"
         )
+        
+        # 雖然不能直接 assign 回 session state 的同一個 key，但我們可以讀取 edited_df
+        # 當作最新狀態。若要切換分頁保留，通常需 on_change callback，但這裡簡化處理：
+        # 當按下按鈕時，使用 edited_df 進行處理。
         
         c1, c2 = st.columns(2)
         
         if c1.button("💾 儲存為暫存 (Draft)", type="secondary"):
-            valid_tasks = edited_tasks[edited_tasks['task_name'] != ""]
+            # 只處理有勾選且有名稱的
+            valid_tasks = edited_df[
+                (edited_df['task_name'] != "") & 
+                (edited_df['Select'] == True)
+            ]
             if not valid_tasks.empty:
                 valid_tasks['owner_email'] = user['email']
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Draft")
                 if succ: 
                     st.success(msg)
-                    reset_editor() # 觸發重置
+                    reset_editor() # 清空
                     time.sleep(1); st.rerun()
                 else: st.error(msg)
-            else: st.warning("請填寫任務")
+            else: st.warning("請勾選要處理的任務")
 
         if c2.button("🚀 送出審核 (Submit)", type="primary"):
-            valid_tasks = edited_tasks[edited_tasks['task_name'] != ""]
+            valid_tasks = edited_df[
+                (edited_df['task_name'] != "") & 
+                (edited_df['Select'] == True)
+            ]
             if not valid_tasks.empty:
                 valid_tasks['owner_email'] = user['email']
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Submitted")
                 if succ: 
                     st.success(msg)
-                    reset_editor() # 觸發重置
+                    reset_editor() # 清空
                     time.sleep(1); st.rerun()
                 else: st.error(msg)
-            else: st.warning("請填寫任務")
+            else: st.warning("請勾選要處理的任務")
         
         st.divider()
         with st.expander("📂 Excel 匯入任務"):
@@ -626,7 +639,7 @@ def employee_page():
                     if succ: st.success(msg)
                     else: st.error(msg)
 
-    elif menu == "📖 相關辦法":
+    with tab3:
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("""
         #### 1. 任務分級與點數
@@ -648,7 +661,6 @@ def employee_page():
 def manager_page():
     user = st.session_state.user
     
-    # 待辦提醒
     df_emp = sys.get_df("employees")
     team = df_emp[df_emp['manager_email'] == user['email']]['email'].tolist()
     df_tasks = sys.get_df("tasks")
