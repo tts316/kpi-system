@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="員工KPI考核系統 (最終優化版)", layout="wide", page_icon="📈")
+st.set_page_config(page_title="員工KPI考核系統 (最終修訂版)", layout="wide", page_icon="📈")
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
 
@@ -82,8 +82,8 @@ class KPIDB:
                 except: return False, f"錯誤: 任務 '{row['task_name']}' 日期格式錯誤"
 
             base_id = int(time.time())
-            # 使用 owner_email 和 index 確保唯一性
-            df_tasks['task_id'] = [f"{base_id}_{i}_{row['owner_email']}" for i, row in df_tasks.iterrows()]
+            # 使用 timestamp + index 產生 ID
+            df_tasks['task_id'] = [f"{base_id}_{i}" for i in range(len(df_tasks))]
             
             df_tasks['points'] = 0
             df_tasks['status'] = initial_status
@@ -105,29 +105,34 @@ class KPIDB:
                 
             values = df_tasks[cols].values.tolist()
             self.ws_tasks.append_rows(values)
-            return True, f"已新增 {len(values)} 筆任務 (狀態: {initial_status})"
+            return True, f"已新增 {len(values)} 筆任務"
         except Exception as e: return False, str(e)
 
-    def delete_batch_tasks_by_ids(self, task_ids):
-        """刪除指定的任務 ID (用於將暫存移回編輯區時)"""
+    def delete_task(self, task_id):
         try:
-            current = self.ws_tasks.get_all_records()
-            # 保留不在刪除清單中的任務
-            # 注意：這裡要確保 task_id 轉成字串比對
-            new_records = [r for r in current if str(r['task_id']) not in [str(t) for t in task_ids]]
-            
-            headers = ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at']
-            
-            # 轉換回 List
-            final_data = []
-            for item in new_records:
-                row = [item.get(h, "") for h in headers]
-                final_data.append(row)
-            
-            self.ws_tasks.clear()
-            self.ws_tasks.append_row(headers)
-            self.ws_tasks.append_rows(final_data)
-            return True, "刪除舊資料成功"
+            cell = self.ws_tasks.find(str(task_id), in_column=1)
+            if cell:
+                self.ws_tasks.delete_rows(cell.row)
+                return True, "刪除成功"
+            return False, "找不到任務"
+        except Exception as e: return False, str(e)
+
+    def update_task_content(self, task_id, name, desc, s_date, e_date, size, status="Submitted"):
+        try:
+            cell = self.ws_tasks.find(str(task_id), in_column=1)
+            if cell:
+                r = cell.row
+                # 欄位順序: task_id(1), owner(2), name(3), desc(4), start(5), end(6), size(7), points(8), status(9)
+                self.ws_tasks.update_cell(r, 3, name)
+                self.ws_tasks.update_cell(r, 4, desc)
+                self.ws_tasks.update_cell(r, 5, str(s_date))
+                self.ws_tasks.update_cell(r, 6, str(e_date))
+                self.ws_tasks.update_cell(r, 7, size)
+                self.ws_tasks.update_cell(r, 9, status) # 更新狀態
+                # 清除之前的評語
+                self.ws_tasks.update_cell(r, 12, "") 
+                return True, "更新並送出成功"
+            return False, "更新失敗"
         except Exception as e: return False, str(e)
 
     def batch_update_tasks_status(self, updates_list):
@@ -135,7 +140,6 @@ class KPIDB:
             all_tasks = self.get_df("tasks")
             all_tasks['task_id'] = all_tasks['task_id'].astype(str)
             task_map = {str(r['task_id']): i for i, r in all_tasks.iterrows()}
-            
             count = 0
             for up in updates_list:
                 tid = str(up['task_id'])
@@ -147,9 +151,7 @@ class KPIDB:
                     if 'comment' in up: all_tasks.at[idx, 'manager_comment'] = up['comment']
                     if up['status'] == "Approved": all_tasks.at[idx, 'approved_at'] = str(date.today())
                     count += 1
-            
-            if count > 0:
-                return self.batch_update_sheet(self.ws_tasks, all_tasks, "task_id")
+            if count > 0: return self.batch_update_sheet(self.ws_tasks, all_tasks, "task_id")
             return True, "無變更"
         except Exception as e: return False, str(e)
 
@@ -206,6 +208,7 @@ class KPIDB:
     def batch_import_employees(self, df):
         try:
             current = self.get_df("employees")
+            if current.empty: current = pd.DataFrame(columns=["email", "name", "password", "department", "manager_email", "role"])
             df['role'] = 'user'
             rename_map = {"Email": "email", "姓名": "name", "密碼": "password", "單位": "department", "主管Email": "manager_email"}
             df.rename(columns=rename_map, inplace=True)
@@ -223,6 +226,7 @@ class KPIDB:
     def batch_import_depts(self, df):
         try:
             current = self.get_df("departments")
+            if current.empty: current = pd.DataFrame(columns=["dept_id", "dept_name", "level", "parent_dept_id"])
             rename_map = {"部門代號": "dept_id", "部門名稱": "dept_name", "層級": "level", "上層代號": "parent_dept_id"}
             df.rename(columns=rename_map, inplace=True)
             combined = pd.concat([current, df], ignore_index=True).drop_duplicates(subset=['dept_id'], keep='last')
@@ -250,6 +254,8 @@ def calc_expected_progress(start_str, end_str):
         if total <= 0: return 100
         return int(((today - s).days / total) * 100)
     except: return 0
+
+# --- UI Pages ---
 
 def login_page():
     st.markdown("## 📈 員工點數制 KPI 系統")
@@ -379,6 +385,17 @@ def employee_page():
         }
         st.session_state.batch_df = pd.DataFrame(default_data)
 
+    # 必須定義重置函數
+    def reset_editor_state():
+        default_data = {
+            "task_name": [""] * 10,
+            "description": [""] * 10,
+            "start_date": [date.today()] * 10,
+            "end_date": [date.today() + timedelta(days=7)] * 10,
+            "size": ["M"] * 10
+        }
+        st.session_state.batch_df = pd.DataFrame(default_data)
+
     tab1, tab2, tab3 = st.tabs(["📝 任務列表", "➕ 批次新增任務", "📖 相關辦法"])
 
     with tab1:
@@ -388,10 +405,9 @@ def employee_page():
         if df_tasks.empty:
             st.info("尚無任何任務")
         else:
-            # 強制過濾並轉換 ID 為字串
+            df_tasks['task_id'] = df_tasks['task_id'].astype(str)
             my_tasks = df_tasks[df_tasks['owner_email'].astype(str) == str(user['email'])].copy()
             
-            # 分類
             drafts = my_tasks[my_tasks['status'] == 'Draft']
             submitted = my_tasks[my_tasks['status'] == 'Submitted']
             approved = my_tasks[my_tasks['status'] == 'Approved']
@@ -405,7 +421,7 @@ def employee_page():
                 draft_opts = [f"{r['task_name']} ({r['task_id']})" for i, r in drafts.iterrows()]
                 selected_drafts = st.multiselect("勾選任務進行操作", draft_opts)
                 
-                col_d1, col_d2 = st.columns(2)
+                col_d1, col_d2, col_d3 = st.columns(3)
                 if col_d1.button("🚀 送出審核 (選取項目)"):
                     updates = []
                     for item in selected_drafts:
@@ -415,49 +431,18 @@ def employee_page():
                         sys.batch_update_tasks_status(updates)
                         st.success("已送出審核"); time.sleep(1); st.rerun()
                 
-                if col_d2.button("✏️ 帶入批次編輯 (刪除原暫存)"):
-                    # 將選取的暫存任務載入到 Session State，並刪除資料庫中的舊紀錄
-                    load_data = []
-                    ids_to_delete = []
-                    
+                if col_d2.button("🗑️ 刪除 (選取項目)"):
                     for item in selected_drafts:
                         tid = item.split("(")[-1].replace(")", "")
-                        task_row = drafts[drafts['task_id'].astype(str) == tid].iloc[0]
-                        
-                        load_data.append({
-                            "task_name": task_row['task_name'],
-                            "description": task_row['description'],
-                            "start_date": pd.to_datetime(task_row['start_date']).date(),
-                            "end_date": pd.to_datetime(task_row['end_date']).date(),
-                            "size": task_row['size']
-                        })
-                        ids_to_delete.append(tid)
-                    
-                    if load_data:
-                        # 補齊到 10 行，避免格式跑掉
-                        while len(load_data) < 10:
-                            load_data.append({
-                                "task_name": "", "description": "", 
-                                "start_date": date.today(), "end_date": date.today() + timedelta(days=7), 
-                                "size": "M"
-                            })
-                        
-                        # 更新 Session State
-                        st.session_state.batch_df = pd.DataFrame(load_data)
-                        
-                        # 刪除舊資料
-                        sys.delete_batch_tasks_by_ids(ids_to_delete)
-                        
-                        st.success("已載入編輯區，請切換至「批次新增任務」頁籤進行修改。")
-                        time.sleep(2)
-                        st.rerun()
+                        sys.delete_task(tid)
+                    st.success("已刪除"); time.sleep(1); st.rerun()
 
             else:
                 st.caption("無暫存任務")
             
             st.divider()
 
-            # 2. 送審區 (Submitted)
+            # 2. 送審區
             st.markdown("### ⏳ 送審中")
             if not submitted.empty:
                 st.dataframe(submitted[['task_name', 'start_date', 'end_date', 'size', 'description']])
@@ -470,14 +455,31 @@ def employee_page():
             st.markdown("### ✅ 已核可 / ⚠️ 被退回")
             if not rejected.empty:
                 for i, r in rejected.iterrows():
-                    st.error(f"**{r['task_name']}** | 評語: {r['manager_comment']}")
-                    if st.button("重送審核", key=f"re_{r['task_id']}"):
-                        sys.batch_update_tasks_status([{'task_id': str(r['task_id']), 'status': "Submitted"}])
-                        st.rerun()
-            
+                    with st.expander(f"⚠️ {r['task_name']} (被退回)"):
+                        st.error(f"主管評語: {r['manager_comment']}")
+                        
+                        # 提供編輯表單重新送出
+                        with st.form(f"edit_rej_{r['task_id']}"):
+                            st.write("修改後重新送出：")
+                            new_name = st.text_input("名稱", value=r['task_name'])
+                            new_desc = st.text_input("說明", value=r['description'])
+                            c1, c2, c3 = st.columns(3)
+                            new_start = c1.date_input("開始", value=pd.to_datetime(r['start_date']))
+                            new_end = c2.date_input("結束", value=pd.to_datetime(r['end_date']))
+                            new_size = c3.selectbox("大小", ["S","M","L","XL"], index=["S","M","L","XL"].index(r['size']))
+                            
+                            col_sub, col_del = st.columns(2)
+                            if col_sub.form_submit_button("🚀 修改並重送"):
+                                sys.update_task_content(r['task_id'], new_name, new_desc, new_start, new_end, new_size, "Submitted")
+                                st.success("已重送"); time.sleep(1); st.rerun()
+                            
+                            if col_del.form_submit_button("🗑️ 刪除此任務"):
+                                sys.delete_task(r['task_id'])
+                                st.success("已刪除"); time.sleep(1); st.rerun()
+
             if not approved.empty:
                 for i, r in approved.iterrows():
-                    with st.expander(f"{r['task_name']} ({r['points']}點)"):
+                    with st.expander(f"✅ {r['task_name']} ({r['points']}點)"):
                         st.write(f"📅 {r['start_date']} ~ {r['end_date']}")
                         exp = calc_expected_progress(r['start_date'], r['end_date'])
                         c1, c2 = st.columns(2)
@@ -495,7 +497,6 @@ def employee_page():
         st.subheader("批次新增任務")
         st.markdown("填寫完畢後，可選擇 **「僅暫存」** 或 **「送出審核」**。")
         
-        # 使用 Session State 的 DataFrame
         edited_tasks = st.data_editor(
             st.session_state.batch_df,
             column_config={
@@ -509,17 +510,6 @@ def employee_page():
             use_container_width=True
         )
         
-        # 定義重置函式
-        def reset_editor():
-            default_data = {
-                "task_name": [""] * 10,
-                "description": [""] * 10,
-                "start_date": [date.today()] * 10,
-                "end_date": [date.today() + timedelta(days=7)] * 10,
-                "size": ["M"] * 10
-            }
-            st.session_state.batch_df = pd.DataFrame(default_data)
-
         c1, c2 = st.columns(2)
         
         if c1.button("💾 儲存為暫存 (Draft)", type="secondary"):
@@ -529,19 +519,19 @@ def employee_page():
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Draft")
                 if succ: 
                     st.success(msg)
-                    reset_editor() # 清空表格
+                    reset_editor_state() # 清空表格
                     time.sleep(1); st.rerun()
                 else: st.error(msg)
             else: st.warning("請填寫任務")
 
-        if c2.button("🚀 送出審核", type="primary"):
+        if c2.button("🚀 暫存並送出 (Submit)", type="primary"):
             valid_tasks = edited_tasks[edited_tasks['task_name'] != ""]
             if not valid_tasks.empty:
                 valid_tasks['owner_email'] = user['email']
                 succ, msg = sys.batch_add_tasks(valid_tasks, initial_status="Submitted")
                 if succ: 
                     st.success(msg)
-                    reset_editor() # 清空表格
+                    reset_editor_state() # 清空表格
                     time.sleep(1); st.rerun()
                 else: st.error(msg)
             else: st.warning("請填寫任務")
@@ -580,26 +570,24 @@ def employee_page():
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("""
         #### 1. 任務分級與點數
-        *   **S (Small)**: 1~3 點 (例：例行性事務，半天內可完成)
-        *   **M (Medium)**: 4~6 點 (例：小型專案，需跨部門溝通)
-        *   **L (Large)**: 7~9 點 (例：中型專案，需一週工作量)
-        *   **XL (Extra Large)**: 10~12 點 (例：年度重點專案)
+        *   **S (Small)**: 1~3 點
+        *   **M (Medium)**: 4~6 點
+        *   **L (Large)**: 7~9 點
+        *   **XL (Extra Large)**: 10~12 點
 
-        #### 2. 進度計算公式
-        *   **預計進度 %** = `(今天日期 - 開始日期) / (結束日期 - 開始日期)`
-        *   若 `回報進度` 落後於 `預計進度`，系統將以紅色標示提醒。
-
+        #### 2. 進度計算
+        *   系統依據開始與結束日期自動計算預計進度。
+        
         #### 3. 簽核流程
-        1.  **暫存 (Draft)**：員工編寫任務，主管看不到，可隨時修改。
-        2.  **送審 (Submitted)**：送出後不可修改，主管將收到通知。
-        3.  **核准 (Approved)**：主管確認等級與點數後核准，任務開始執行。
-        4.  **退件 (Rejected)**：若內容不符，主管可退回，員工修改後需重新送審。
+        *   **Draft**: 暫存中，僅自己可見。
+        *   **Submitted**: 已送出，等待主管審核。
+        *   **Approved**: 主管核准，開始執行。
+        *   **Rejected**: 被退回，請依主管評語修改後重送，或直接刪除。
         """)
 
 def manager_page():
     user = st.session_state.user
     
-    # 待辦提醒
     df_emp = sys.get_df("employees")
     team = df_emp[df_emp['manager_email'] == user['email']]['email'].tolist()
     df_tasks = sys.get_df("tasks")
