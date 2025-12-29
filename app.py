@@ -280,11 +280,13 @@ def admin_page():
             edited_df = st.data_editor(
                 df_emp[cols_order],
                 column_config={
-                    "刪除": st.column_config.CheckboxColumn(default=False),
+                    "刪除": st.column_config.CheckboxColumn(help="勾選後按下方儲存即可刪除", default=False),
                     "email": st.column_config.TextColumn(disabled=True)
                 },
-                use_container_width=True, hide_index=True
+                use_container_width=True,
+                hide_index=True
             )
+            
             if st.button("💾 儲存員工變更", type="primary"):
                 to_keep = edited_df[edited_df['刪除'] == False].drop(columns=['刪除'])
                 succ, msg = sys.save_employees_from_editor(to_keep)
@@ -322,7 +324,8 @@ def admin_page():
                     "刪除": st.column_config.CheckboxColumn(default=False),
                     "dept_id": st.column_config.TextColumn(disabled=True)
                 },
-                use_container_width=True, hide_index=True
+                use_container_width=True, 
+                hide_index=True
             )
             if st.button("💾 儲存組織變更"):
                 to_keep = edited_dept[edited_dept['刪除'] == False].drop(columns=['刪除'])
