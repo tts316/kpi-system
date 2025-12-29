@@ -38,7 +38,7 @@ class KPIDB:
             self.ws_dept = self.sh.worksheet("departments")
             self.ws_tasks = self.sh.worksheet("tasks")
             self.ws_admin = self.sh.worksheet("system_admin")
-            self.ws_settings = self.sh.worksheet("system_settings")
+            self.ws_settings = self.sh.worksheet("system_settings") # 設定檔
         except Exception as e:
             st.error(f"連線失敗: {e}")
             st.stop()
@@ -85,31 +85,24 @@ class KPIDB:
             return True, "更新成功"
         except Exception as e: return False, str(e)
 
-    # --- Logo 設定存取 ---
+    # --- Logo 設定 ---
     def get_setting(self, key):
         try:
             cell = self.ws_settings.find(key, in_column=1)
-            if cell:
-                return self.ws_settings.cell(cell.row, 2).value
+            if cell: return self.ws_settings.cell(cell.row, 2).value
             return None
         except: return None
 
     def update_setting(self, key, value):
         try:
-            try:
-                cell = self.ws_settings.find(key, in_column=1)
-            except:
-                time.sleep(1)
-                cell = self.ws_settings.find(key, in_column=1)
-                
-            if cell:
-                self.ws_settings.update_cell(cell.row, 2, value)
-            else:
-                self.ws_settings.append_row([key, value])
+            try: cell = self.ws_settings.find(key, in_column=1)
+            except: time.sleep(1); cell = self.ws_settings.find(key, in_column=1)
+            
+            if cell: self.ws_settings.update_cell(cell.row, 2, value)
+            else: self.ws_settings.append_row([key, value])
             return True, "設定已更新"
         except Exception as e: return False, str(e)
 
-    # --- 既有功能 ---
     def batch_add_tasks(self, df_tasks, initial_status="Draft"):
         try:
             for idx, row in df_tasks.iterrows():
@@ -121,6 +114,7 @@ class KPIDB:
 
             base_id = int(time.time())
             df_tasks['task_id'] = [f"{base_id}_{i}_{int(time.time()*1000)%1000}" for i in range(len(df_tasks))]
+            
             df_tasks['points'] = 0
             df_tasks['status'] = initial_status
             df_tasks['progress_pct'] = 0
@@ -359,6 +353,7 @@ def render_personal_task_module(user):
                 st.dataframe(drafts[['task_name', 'start_date', 'end_date', 'size', 'description']], hide_index=True)
                 draft_opts = [f"{r['task_name']} ({r['task_id']})" for i, r in drafts.iterrows()]
                 selected_drafts = st.multiselect("勾選任務進行操作", draft_opts)
+                
                 c1, c2, c3 = st.columns(3)
                 if c1.button("🚀 送出審核 (選取項目)"):
                     updates = []
@@ -368,6 +363,7 @@ def render_personal_task_module(user):
                     if updates:
                         sys.batch_update_tasks_status(updates)
                         st.success("已送出審核"); time.sleep(1); st.rerun()
+                
                 if c2.button("✏️ 帶入批次編輯 (並刪除原暫存)"):
                     load_data = []
                     ids_to_del = []
@@ -375,8 +371,10 @@ def render_personal_task_module(user):
                         tid = item.split("(")[-1].replace(")", "")
                         task_row = drafts[drafts['task_id'].astype(str) == str(tid)].iloc[0]
                         load_data.append({
-                            "task_name": task_row['task_name'], "description": task_row['description'],
-                            "start_date": pd.to_datetime(task_row['start_date']).date(), "end_date": pd.to_datetime(task_row['end_date']).date(),
+                            "task_name": task_row['task_name'],
+                            "description": task_row['description'],
+                            "start_date": pd.to_datetime(task_row['start_date']).date(),
+                            "end_date": pd.to_datetime(task_row['end_date']).date(),
                             "size": task_row['size']
                         })
                         ids_to_del.append(tid)
@@ -486,11 +484,11 @@ def render_personal_task_module(user):
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
 
+# --- UI Pages (Admin) ---
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
-    
-    # [修正] 補上系統設定頁籤
+    # [修正] 補回 3 個 Tab
     tab1, tab2, tab3 = st.tabs(["👥 員工管理", "🏢 組織圖", "⚙️ 系統設定"])
     
     with tab1:
@@ -526,6 +524,7 @@ def admin_page():
             if up and st.button("確認匯入"):
                 sys.batch_import_employees(pd.read_excel(up))
                 st.success("匯入完成"); st.rerun()
+    
     with tab2:
         st.subheader("組織資料維護")
         with st.expander("➕ 單筆新增部門"):
@@ -554,6 +553,8 @@ def admin_page():
             if up_d and st.button("確認匯入組織"):
                 sys.batch_import_depts(pd.read_excel(up_d))
                 st.success("匯入完成"); st.rerun()
+
+    # [新增] 系統設定 Tab
     with tab3:
         st.subheader("⚙️ 系統設定")
         st.write("設定公司 Logo (圖片)")
@@ -569,7 +570,6 @@ def admin_page():
                     bytes_data = up_logo.getvalue()
                     base64_str = base64.b64encode(bytes_data).decode()
                     full_str = f"data:image/png;base64,{base64_str}"
-                    # 檢查大小
                     if len(full_str) > 50000:
                         st.error("圖片過大 (超過 50,000 字元)，請壓縮後再試，或使用 URL 方式。")
                     else:
