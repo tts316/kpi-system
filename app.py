@@ -216,6 +216,15 @@ class KPIDB:
             return True, "密碼已修改"
         except Exception as e: return False, str(e)
 
+    def update_line_token(self, email, token):
+        try:
+            cell = self.ws_emp.find(email, in_column=1)
+            if cell:
+                self.ws_emp.update_cell(cell.row, 7, token)
+                return True, "LINE Token 已更新"
+            return False, "找不到使用者"
+        except Exception as e: return False, str(e)
+
     def verify_user(self, email, password):
         email = str(email).strip().lower()
         if email == "admin":
@@ -313,6 +322,7 @@ def change_password_ui(role, email):
                 else: st.error(msg)
             else: st.error("密碼不一致或為空")
 
+# --- 共用模組：個人任務功能 ---
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
@@ -483,7 +493,7 @@ def render_personal_task_module(user):
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
 
-# 4. 管理員頁面
+# --- UI Pages (Admin) ---
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
@@ -582,7 +592,6 @@ def admin_page():
                 sys.update_setting("logo", logo_url)
                 st.success("Logo URL 已更新"); time.sleep(1); st.rerun()
 
-# 5. 主管介面
 def manager_page():
     user = st.session_state.user
     st.header(f"👨‍💼 主管審核 - {user['name']}")
@@ -701,6 +710,13 @@ def login_page():
                 st.session_state.user = user
                 st.rerun()
             else: st.error("帳號或密碼錯誤")
+
+# --- 7. 員工頁面入口 ---
+def employee_page():
+    user = st.session_state.user
+    st.header(f"👋 {user['name']}")
+    change_password_ui("user", user['email'])
+    render_personal_task_module(user)
 
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
