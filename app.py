@@ -46,7 +46,7 @@ class KPIDB:
     def get_df(self, table_name):
         defaults = {
             "tasks": ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at'],
-            "employees": ["email", "name", "password", "department", "manager_email", "role", "line_token"],
+            "employees": ["email", "name", "password", "department", "manager_email", "role"],
             "departments": ["dept_id", "dept_name", "level", "parent_dept_id"],
             "system_settings": ["key", "value"]
         }
@@ -216,15 +216,6 @@ class KPIDB:
             return True, "密碼已修改"
         except Exception as e: return False, str(e)
 
-    def update_line_token(self, email, token):
-        try:
-            cell = self.ws_emp.find(email, in_column=1)
-            if cell:
-                self.ws_emp.update_cell(cell.row, 7, token)
-                return True, "LINE Token 已更新"
-            return False, "找不到使用者"
-        except Exception as e: return False, str(e)
-
     def verify_user(self, email, password):
         email = str(email).strip().lower()
         if email == "admin":
@@ -322,6 +313,23 @@ def change_password_ui(role, email):
                 else: st.error(msg)
             else: st.error("密碼不一致或為空")
 
+# --- 頁面函式定義 ---
+
+# 1. 登入頁
+def login_page():
+    st.markdown("## 📈 聯成教育員工KPI考核系統")
+    col1, col2 = st.columns(2)
+    with col1:
+        email_input = st.text_input("帳號 (Email)")
+        password = st.text_input("密碼", type="password")
+        if st.button("登入", type="primary"):
+            user = sys.verify_user(email_input, password)
+            if user:
+                st.session_state.user = user
+                st.rerun()
+            else: st.error("帳號或密碼錯誤")
+
+# 2. 共用模組：個人任務功能
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
@@ -379,10 +387,8 @@ def render_personal_task_module(user):
                         tid = item.split("(")[-1].replace(")", "")
                         task_row = drafts[drafts['task_id'].astype(str) == str(tid)].iloc[0]
                         load_data.append({
-                            "task_name": task_row['task_name'],
-                            "description": task_row['description'],
-                            "start_date": pd.to_datetime(task_row['start_date']).date(),
-                            "end_date": pd.to_datetime(task_row['end_date']).date(),
+                            "task_name": task_row['task_name'], "description": task_row['description'],
+                            "start_date": pd.to_datetime(task_row['start_date']).date(), "end_date": pd.to_datetime(task_row['end_date']).date(),
                             "size": task_row['size']
                         })
                         ids_to_del.append(tid)
@@ -492,7 +498,7 @@ def render_personal_task_module(user):
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
 
-# --- UI Pages (Admin) ---
+# 3. 管理員頁面
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
@@ -591,6 +597,15 @@ def admin_page():
                 sys.update_setting("logo", logo_url)
                 st.success("Logo URL 已更新"); time.sleep(1); st.rerun()
 
+# 4. 員工介面
+def employee_page():
+    user = st.session_state.user
+    st.header(f"👋 {user['name']}")
+    change_password_ui("user", user['email'])
+    # 直接調用共用模組
+    render_personal_task_module(user)
+
+# 5. 主管介面
 def manager_page():
     user = st.session_state.user
     st.header(f"👨‍💼 主管審核 - {user['name']}")
@@ -696,7 +711,7 @@ def manager_page():
                         st.dataframe(dept_data[cols_to_show].style.map(highlight_delay, subset=['進度差異']), column_config={"name": "姓名", "task_name": "任務", "progress_pct": "回報%", "progress_desc": "說明"}, use_container_width=True)
             else: st.info("您目前沒有下屬資料")
 
-# --- 3. 程式進入點 (Entry Point) ---
+# --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
 
 logo_data = sys.get_setting("logo")
@@ -710,7 +725,6 @@ with st.sidebar:
         except: pass
     st.divider()
 
-# 定義完所有函式後，才開始執行邏輯
 if st.session_state.user is None:
     login_page()
 else:
@@ -724,6 +738,5 @@ else:
         df_emp = sys.get_df("employees")
         is_mgr = not df_emp[df_emp['manager_email'] == st.session_state.user['email']].empty
         if is_mgr: manager_page()
-        else: 
-            # 確保 employee_page 已定義
-            employee_page()
+        else: employee_page()
+
