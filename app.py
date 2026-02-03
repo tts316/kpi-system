@@ -4,7 +4,8 @@ from datetime import datetime, date, timedelta
 import time
 import io
 import base64
-import requests # 新增：用於發送 LINE 通知
+import smtplib
+from email.mime.text import MIMEText
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
@@ -13,6 +14,12 @@ from gspread.exceptions import APIError
 st.set_page_config(page_title="聯成教育員工KPI考核系統", layout="wide", page_icon="📈")
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
+
+# Email 設定
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = ""      
+SENDER_PASSWORD = ""   
 
 # --- 2. 資料庫核心 ---
 class KPIDB:
@@ -39,7 +46,7 @@ class KPIDB:
     def get_df(self, table_name):
         defaults = {
             "tasks": ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', 'points', 'status', 'progress_pct', 'progress_desc', 'manager_comment', 'created_at', 'approved_at'],
-            "employees": ["email", "name", "password", "department", "manager_email", "role", "line_token"], # 新增 line_token
+            "employees": ["email", "name", "password", "department", "manager_email", "role", "line_token"],
             "departments": ["dept_id", "dept_name", "level", "parent_dept_id"],
             "system_settings": ["key", "value"]
         }
@@ -62,7 +69,6 @@ class KPIDB:
                     if table_name == "employees" and not df.empty:
                         df['email'] = df['email'].astype(str).str.strip().str.lower()
                         df['manager_email'] = df['manager_email'].astype(str).str.strip().str.lower()
-                        if 'line_token' not in df.columns: df['line_token'] = "" # 防呆
 
                     if df.empty and table_name in defaults: return pd.DataFrame(columns=defaults[table_name])
                     if table_name == "tasks" and "task_id" not in df.columns:
@@ -90,34 +96,12 @@ class KPIDB:
         try:
             try: cell = self.ws_settings.find(key, in_column=1)
             except: time.sleep(1); cell = self.ws_settings.find(key, in_column=1)
+            
             if cell: self.ws_settings.update_cell(cell.row, 2, value)
             else: self.ws_settings.append_row([key, value])
             return True, "設定已更新"
         except Exception as e: return False, str(e)
 
-    # --- LINE 通知核心 ---
-    def get_user_token(self, email):
-        """取得指定員工的 LINE Token"""
-        try:
-            df = self.get_df("employees")
-            user = df[df['email'] == email]
-            if not user.empty:
-                token = str(user.iloc[0].get('line_token', '')).strip()
-                return token if token else None
-        except: pass
-        return None
-
-    def send_line_notify(self, token, message):
-        """發送 LINE 通知"""
-        if not token: return
-        try:
-            url = "https://notify-api.line.me/api/notify"
-            headers = {"Authorization": "Bearer " + token}
-            payload = {"message": message}
-            requests.post(url, headers=headers, data=payload)
-        except: pass
-
-    # --- 任務寫入與通知 ---
     def batch_add_tasks(self, df_tasks, initial_status="Draft"):
         try:
             for idx, row in df_tasks.iterrows():
@@ -149,21 +133,6 @@ class KPIDB:
             if not current_vals: self.ws_tasks.append_row(cols)
             values = df_tasks[cols].values.tolist()
             self.ws_tasks.append_rows(values)
-
-            # [通知] 若狀態為 Submitted，通知主管
-            if initial_status == "Submitted":
-                # 取得該員工的主管
-                df_emp = self.get_df("employees")
-                owner_email = df_tasks['owner_email'].iloc[0] # 批次通常同一人
-                user_row = df_emp[df_emp['email'] == owner_email]
-                if not user_row.empty:
-                    mgr_email = user_row.iloc[0]['manager_email']
-                    mgr_token = self.get_user_token(mgr_email)
-                    user_name = user_row.iloc[0]['name']
-                    if mgr_token:
-                        msg = f"\n【KPI 待審核通知】\n同仁：{user_name}\n已提交 {len(df_tasks)} 筆新任務，請進入系統審核。"
-                        self.send_line_notify(mgr_token, msg)
-
             return True, f"已新增 {len(values)} 筆任務"
         except Exception as e: return False, str(e)
 
@@ -189,55 +158,17 @@ class KPIDB:
             all_tasks['task_id'] = all_tasks['task_id'].astype(str).str.strip()
             task_map = {str(r['task_id']): i for i, r in all_tasks.iterrows()}
             count = 0
-            
-            # 收集通知對象
-            notify_targets = {} # {email: [messages]}
-
             for up in updates_list:
                 tid = str(up['task_id']).strip()
                 if tid in task_map:
                     idx = task_map[tid]
-                    old_status = all_tasks.at[idx, 'status']
-                    new_status = up['status']
-                    
-                    # 更新資料
-                    all_tasks.at[idx, 'status'] = new_status
+                    all_tasks.at[idx, 'status'] = up['status']
                     if 'points' in up: all_tasks.at[idx, 'points'] = up['points']
                     if 'size' in up: all_tasks.at[idx, 'size'] = up['size']
                     if 'comment' in up: all_tasks.at[idx, 'manager_comment'] = up['comment']
-                    if new_status == "Approved": all_tasks.at[idx, 'approved_at'] = str(date.today())
-                    
+                    if up['status'] == "Approved": all_tasks.at[idx, 'approved_at'] = str(date.today())
                     count += 1
-
-                    # [通知] 邏輯
-                    owner_email = all_tasks.at[idx, 'owner_email']
-                    task_name = all_tasks.at[idx, 'task_name']
-                    
-                    # 1. 員工送審 -> 通知主管
-                    if old_status == "Draft" and new_status == "Submitted":
-                        # 需查主管 Email
-                        df_emp = self.get_df("employees")
-                        u_row = df_emp[df_emp['email'] == owner_email]
-                        if not u_row.empty:
-                            mgr_email = u_row.iloc[0]['manager_email']
-                            if mgr_email not in notify_targets: notify_targets[mgr_email] = []
-                            notify_targets[mgr_email].append(f"同仁送審：{task_name}")
-
-                    # 2. 主管核准/退件 -> 通知員工
-                    if new_status in ["Approved", "Rejected"]:
-                        if owner_email not in notify_targets: notify_targets[owner_email] = []
-                        status_text = "✅ 已核准" if new_status == "Approved" else "⚠️ 被退回"
-                        notify_targets[owner_email].append(f"任務 {status_text}：{task_name}")
-
-            if count > 0:
-                # 執行通知發送
-                for email, msgs in notify_targets.items():
-                    token = self.get_user_token(email)
-                    if token:
-                        full_msg = "\n【KPI 系統通知】\n" + "\n".join(msgs)
-                        self.send_line_notify(token, full_msg)
-
-                return self.batch_update_sheet(self.ws_tasks, all_tasks, "task_id")
+            if count > 0: return self.batch_update_sheet(self.ws_tasks, all_tasks, "task_id")
             return True, "無變更"
         except Exception as e: return False, str(e)
 
@@ -253,17 +184,6 @@ class KPIDB:
                 self.ws_tasks.update_cell(r, 7, size)
                 self.ws_tasks.update_cell(r, 9, status)
                 self.ws_tasks.update_cell(r, 12, "") 
-                
-                # [通知] 重送審核 -> 通知主管
-                if status == "Submitted":
-                    row_vals = self.ws_tasks.row_values(r)
-                    owner = row_vals[1]
-                    df_emp = self.get_df("employees")
-                    u_row = df_emp[df_emp['email'] == owner]
-                    if not u_row.empty:
-                        mgr_token = self.get_user_token(u_row.iloc[0]['manager_email'])
-                        self.send_line_notify(mgr_token, f"\n【KPI 系統】\n同仁 {u_row.iloc[0]['name']} 已重新提交任務：{name}")
-
                 return True, "成功"
             return False, "失敗"
         except Exception as e: return False, str(e)
@@ -281,13 +201,6 @@ class KPIDB:
             if cell:
                 self.ws_tasks.update_cell(cell.row, 10, pct)
                 self.ws_tasks.update_cell(cell.row, 11, desc)
-                
-                # [通知] 更新進度 -> 通知主管 (可選，避免太吵，這裡示範加入)
-                # row_vals = self.ws_tasks.row_values(cell.row)
-                # owner = row_vals[1]
-                # task_name = row_vals[2]
-                # ... (取得主管 Token 並發送) ...
-                
                 return True, "成功"
             return False, "失敗"
         except: return False, "Error"
@@ -307,7 +220,6 @@ class KPIDB:
         try:
             cell = self.ws_emp.find(email, in_column=1)
             if cell:
-                # line_token 在第 7 欄 (G)
                 self.ws_emp.update_cell(cell.row, 7, token)
                 return True, "LINE Token 已更新"
             return False, "找不到使用者"
@@ -332,12 +244,12 @@ class KPIDB:
         except: pass
         return None
 
-    def upsert_employee(self, email, name, password, dept, manager, role="user", token=""):
-        df = pd.DataFrame([{"email": email, "name": name, "password": password, "department": dept, "manager_email": manager, "role": role, "line_token": token}])
+    def upsert_employee(self, email, name, password, dept, manager, role="user"):
+        df = pd.DataFrame([{"email": email, "name": name, "password": password, "department": dept, "manager_email": manager, "role": role}])
         return self.save_employees_from_editor(pd.concat([self.get_df("employees"), df], ignore_index=True).drop_duplicates(subset=['email'], keep='last'))
 
     def save_employees_from_editor(self, df_new):
-        cols = ["email", "name", "password", "department", "manager_email", "role", "line_token"]
+        cols = ["email", "name", "password", "department", "manager_email", "role"]
         for c in cols: 
             if c not in df_new.columns: df_new[c] = ""
         df_new = df_new[cols].astype(str)
@@ -349,7 +261,7 @@ class KPIDB:
         try:
             current = self.get_df("employees")
             df['role'] = 'user'
-            rename_map = {"Email": "email", "姓名": "name", "密碼": "password", "單位": "department", "主管Email": "manager_email", "LINE權杖": "line_token"}
+            rename_map = {"Email": "email", "姓名": "name", "密碼": "password", "單位": "department", "主管Email": "manager_email"}
             df.rename(columns=rename_map, inplace=True)
             combined = pd.concat([current, df], ignore_index=True).drop_duplicates(subset=['email'], keep='last')
             return self.save_employees_from_editor(combined)
@@ -400,36 +312,16 @@ def get_full_team_emails(manager_email, df_emp):
 
 # --- UI Components ---
 def change_password_ui(role, email):
-    with st.expander("🔑 帳號設定 (密碼 / LINE通知)"):
-        t1, t2 = st.tabs(["修改密碼", "設定 LINE 通知"])
-        with t1:
-            new_p = st.text_input("新密碼", type="password", key="new_p")
-            cfm_p = st.text_input("確認新密碼", type="password", key="cfm_p")
-            if st.button("確認修改"):
-                if new_p == cfm_p and new_p:
-                    succ, msg = sys.change_password(email, new_p, role)
-                    if succ: st.success(msg)
-                    else: st.error(msg)
-                else: st.error("密碼不一致或為空")
-        
-        with t2:
-            st.markdown("""
-            **如何取得 LINE Token?**
-            1. 前往 [LINE Notify](https://notify-bot.line.me/zh-TW/) 並登入。
-            2. 點擊「個人頁面」 -> 「發行權杖」。
-            3. 輸入權杖名稱 (如: KPI系統)，選擇要接收通知的聊天室 (選「透過1對1聊天接收」)。
-            4. 複製產生的權杖 (Token) 並貼在下方。
-            """)
-            token_in = st.text_input("貼上 LINE Token", type="password")
-            if st.button("儲存 Token"):
-                succ, msg = sys.update_line_token(email, token_in)
-                if succ: 
-                    st.success(msg)
-                    # 測試發送
-                    sys.send_line_notify(token_in, "\n【系統測試】\n恭喜！您的 LINE 通知設定成功！")
+    with st.expander("🔑 修改密碼"):
+        new_p = st.text_input("新密碼", type="password", key="new_p")
+        cfm_p = st.text_input("確認新密碼", type="password", key="cfm_p")
+        if st.button("確認修改"):
+            if new_p == cfm_p and new_p:
+                succ, msg = sys.change_password(email, new_p, role)
+                if succ: st.success(msg)
                 else: st.error(msg)
+            else: st.error("密碼不一致或為空")
 
-# --- 共用模組：個人任務功能 ---
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
@@ -626,7 +518,7 @@ def admin_page():
         df_emp = sys.get_df("employees")
         if not df_emp.empty:
             df_emp['刪除'] = False 
-            cols_order = ['刪除', 'email', 'name', 'password', 'department', 'manager_email', 'role', 'line_token']
+            cols_order = ['刪除', 'email', 'name', 'password', 'department', 'manager_email', 'role']
             edited_df = st.data_editor(df_emp[cols_order], column_config={"刪除": st.column_config.CheckboxColumn(default=False), "email": st.column_config.TextColumn(disabled=True)}, use_container_width=True, hide_index=True)
             if st.button("💾 儲存員工變更", type="primary"):
                 to_keep = edited_df[edited_df['刪除'] == False].drop(columns=['刪除'])
@@ -639,7 +531,6 @@ def admin_page():
             if up and st.button("確認匯入"):
                 sys.batch_import_employees(pd.read_excel(up))
                 st.success("匯入完成"); st.rerun()
-    
     with tab2:
         st.subheader("組織資料維護")
         with st.expander("➕ 單筆新增部門"):
@@ -805,7 +696,7 @@ def manager_page():
                         st.dataframe(dept_data[cols_to_show].style.map(highlight_delay, subset=['進度差異']), column_config={"name": "姓名", "task_name": "任務", "progress_pct": "回報%", "progress_desc": "說明"}, use_container_width=True)
             else: st.info("您目前沒有下屬資料")
 
-# --- Entry ---
+# --- 3. 程式進入點 (Entry Point) ---
 if 'user' not in st.session_state: st.session_state.user = None
 
 logo_data = sys.get_setting("logo")
@@ -819,6 +710,7 @@ with st.sidebar:
         except: pass
     st.divider()
 
+# 定義完所有函式後，才開始執行邏輯
 if st.session_state.user is None:
     login_page()
 else:
@@ -826,9 +718,12 @@ else:
     with st.sidebar:
         st.write(f"👤 {st.session_state.user['name']}")
         if st.button("登出"): st.session_state.user = None; st.rerun()
+    
     if role == "admin": admin_page()
     else:
         df_emp = sys.get_df("employees")
         is_mgr = not df_emp[df_emp['manager_email'] == st.session_state.user['email']].empty
         if is_mgr: manager_page()
-        else: employee_page()
+        else: 
+            # 確保 employee_page 已定義
+            employee_page()
