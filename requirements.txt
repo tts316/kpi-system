@@ -3,4 +3,5 @@ pandas
 openpyxl
 xlsxwriter
 gspread
+requests
 google-auth
