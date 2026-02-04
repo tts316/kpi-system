@@ -3,18 +3,22 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 import time
 import io
-import base64
-import requests
 import smtplib
 from email.mime.text import MIMEText
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
+# [新增] 引入 LINE Messaging API SDK
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+from linebot.exceptions import LineBotApiError
+
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="聯成教育員工KPI考核系統", layout="wide", page_icon="📈")
 
 POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
+LOGO_URL = "https://www.lccnet.com.tw/img/logo.png"
 
 # Email 設定
 SMTP_SERVER = "smtp.gmail.com"
@@ -98,40 +102,47 @@ class KPIDB:
         try:
             try: cell = self.ws_settings.find(key, in_column=1)
             except: time.sleep(1); cell = self.ws_settings.find(key, in_column=1)
-            
             if cell: self.ws_settings.update_cell(cell.row, 2, value)
             else: self.ws_settings.append_row([key, value])
             return True, "設定已更新"
         except Exception as e: return False, str(e)
 
-    # --- LINE 通知 ---
-    def get_user_token(self, email):
+    # --- [修改] Messaging API 通知核心 ---
+    def get_user_id(self, email):
+        """從資料庫取得員工的 LINE User ID (原 line_token 欄位)"""
         try:
-            # 這裡簡單處理：直接讀取最新 dataframe
             df = self.get_df("employees")
             user = df[df['email'] == email]
             if not user.empty:
-                token = str(user.iloc[0].get('line_token', '')).strip()
-                return token if token else None
+                # 這裡取出的其實是 User ID (Uxxxxxxxx...)
+                uid = str(user.iloc[0].get('line_token', '')).strip()
+                return uid if uid else None
         except: pass
         return None
 
-    def send_line_notify(self, token, message):
-        if not token: return
-        try:
-            url = "https://notify-api.line.me/api/notify"
-            headers = {"Authorization": "Bearer " + token}
-            payload = {"message": message}
-            requests.post(url, headers=headers, data=payload)
-        except: pass
+    def send_line_push(self, user_id, message):
+        """使用 Messaging API 推播訊息"""
+        if not user_id: return
         
-    def update_line_token(self, email, token):
+        # 從 Secrets 讀取 Token
+        try:
+            line_token = st.secrets["line_config"]["channel_access_token"]
+            line_bot_api = LineBotApi(line_token)
+            
+            # 發送訊息
+            line_bot_api.push_message(user_id, TextSendMessage(text=message))
+        except KeyError:
+            print("❌ Secrets 中未設定 line_config.channel_access_token")
+        except LineBotApiError as e:
+            print(f"❌ LINE 發送失敗: {e}")
+        
+    def update_user_id(self, email, uid):
         try:
             cell = self.ws_emp.find(email, in_column=1)
             if cell:
-                # line_token 在第 7 欄 (G)
-                self.ws_emp.update_cell(cell.row, 7, token)
-                return True, "LINE Token 已更新"
+                # 更新第 7 欄 (line_token 欄位現在存 User ID)
+                self.ws_emp.update_cell(cell.row, 7, uid)
+                return True, "LINE User ID 已更新"
             return False, "找不到使用者"
         except Exception as e: return False, str(e)
 
@@ -167,18 +178,18 @@ class KPIDB:
             values = df_tasks[cols].values.tolist()
             self.ws_tasks.append_rows(values)
 
-            # [通知]
+            # [通知] 使用新的 push method
             if initial_status == "Submitted":
                 df_emp = self.get_df("employees")
                 owner_email = df_tasks['owner_email'].iloc[0]
                 user_row = df_emp[df_emp['email'] == owner_email]
                 if not user_row.empty:
                     mgr_email = user_row.iloc[0]['manager_email']
-                    mgr_token = self.get_user_token(mgr_email)
+                    mgr_id = self.get_user_id(mgr_email)
                     user_name = user_row.iloc[0]['name']
-                    if mgr_token:
-                        msg = f"\n【KPI 待審核】\n同仁：{user_name}\n提交了 {len(df_tasks)} 筆新任務。"
-                        self.send_line_notify(mgr_token, msg)
+                    if mgr_id:
+                        msg = f"【KPI 待審核】\n同仁：{user_name}\n提交了 {len(df_tasks)} 筆新任務，請進入系統審核。"
+                        self.send_line_push(mgr_id, msg)
 
             return True, f"已新增 {len(values)} 筆任務"
         except Exception as e: return False, str(e)
@@ -221,11 +232,10 @@ class KPIDB:
                     if new_status == "Approved": all_tasks.at[idx, 'approved_at'] = str(date.today())
                     count += 1
 
-                    # 通知邏輯
                     owner_email = all_tasks.at[idx, 'owner_email']
                     task_name = all_tasks.at[idx, 'task_name']
                     
-                    # 員工送審 -> 通知主管
+                    # 1. 員工送審 -> 通知主管
                     if old_status == "Draft" and new_status == "Submitted":
                         df_emp = self.get_df("employees")
                         u_row = df_emp[df_emp['email'] == owner_email]
@@ -234,7 +244,7 @@ class KPIDB:
                             if mgr_email not in notify_targets: notify_targets[mgr_email] = []
                             notify_targets[mgr_email].append(f"同仁送審：{task_name}")
 
-                    # 主管核准/退件 -> 通知員工
+                    # 2. 主管核准/退件 -> 通知員工
                     if new_status in ["Approved", "Rejected"]:
                         if owner_email not in notify_targets: notify_targets[owner_email] = []
                         st_txt = "✅ 已核准" if new_status == "Approved" else "⚠️ 被退回"
@@ -242,8 +252,8 @@ class KPIDB:
 
             if count > 0:
                 for email, msgs in notify_targets.items():
-                    token = self.get_user_token(email)
-                    if token: self.send_line_notify(token, "\n【KPI 通知】\n" + "\n".join(msgs))
+                    uid = self.get_user_id(email)
+                    if uid: self.send_line_push(uid, "【KPI 通知】\n" + "\n".join(msgs))
 
                 return self.batch_update_sheet(self.ws_tasks, all_tasks, "task_id")
             return True, "無變更"
@@ -268,8 +278,8 @@ class KPIDB:
                     df_emp = self.get_df("employees")
                     u_row = df_emp[df_emp['email'] == owner]
                     if not u_row.empty:
-                        mgr_token = self.get_user_token(u_row.iloc[0]['manager_email'])
-                        self.send_line_notify(mgr_token, f"\n【KPI】同仁 {u_row.iloc[0]['name']} 重送任務：{name}")
+                        mgr_id = self.get_user_id(u_row.iloc[0]['manager_email'])
+                        self.send_line_push(mgr_id, f"【KPI】同仁 {u_row.iloc[0]['name']} 重送任務：{name}")
 
                 return True, "成功"
             return False, "失敗"
@@ -390,9 +400,8 @@ def get_full_team_emails(manager_email, df_emp):
 
 # --- UI Components ---
 def change_password_ui(role, email):
-    # [關鍵修正] 使用 st.tabs 分頁顯示「修改密碼」與「LINE設定」
     with st.expander("🔑 帳號設定 (密碼 / LINE通知)"):
-        tab1, tab2 = st.tabs(["修改密碼", "設定 LINE 通知"])
+        tab1, tab2 = st.tabs(["修改密碼", "設定 LINE"])
         
         with tab1:
             new_p = st.text_input("新密碼", type="password", key="new_p")
@@ -405,28 +414,17 @@ def change_password_ui(role, email):
                 else: st.error("密碼不一致或為空")
         
         with tab2:
-            st.markdown("### 🔔 LINE Notify 通知設定")
-            st.info("設定 Token 後，當任務狀態更新時，您將會收到 LINE 通知。")
-            st.markdown("""
-            **如何取得 Token?**
-            1. 前往 [LINE Notify](https://notify-bot.line.me/zh-TW/) 並登入。
-            2. 點擊右上角個人頁面 -> **發行權杖**。
-            3. 輸入名稱 (如: 公司KPI)，選擇 **「透過1對1聊天接收」**。
-            4. 複製產生的權杖 (Token) 並貼在下方。
-            """)
-            
-            token_in = st.text_input("貼上 LINE Token", type="password")
-            if st.button("儲存 Token"):
-                if token_in:
-                    succ, msg = sys.update_line_token(email, token_in)
+            st.markdown("### 🔔 LINE 綁定設定")
+            st.info("請輸入您的 LINE User ID (U 開頭亂碼)，以接收推播通知。")
+            uid_in = st.text_input("LINE User ID", key="uid_in")
+            if st.button("儲存 ID"):
+                if uid_in:
+                    succ, msg = sys.update_user_id(email, uid_in)
                     if succ:
                         st.success(msg)
-                        # 發送測試訊息
-                        sys.send_line_notify(token_in, "\n【系統測試】\n恭喜！您的 LINE 通知已設定成功！")
-                    else:
-                        st.error(msg)
-                else:
-                    st.warning("請輸入 Token")
+                        sys.send_line_push(uid_in, "【系統測試】\n恭喜！您的 LINE 通知已綁定成功！")
+                    else: st.error(msg)
+                else: st.warning("請輸入 User ID")
 
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
@@ -677,42 +675,47 @@ def admin_page():
             if up_d and st.button("確認匯入組織"):
                 sys.batch_import_depts(pd.read_excel(up_d))
                 st.success("匯入完成"); st.rerun()
+
     with tab3:
         st.subheader("⚙️ 系統設定")
         st.write("設定公司 Logo (圖片)")
+        
         current_logo = sys.get_setting("logo")
-        if current_logo: st.image(current_logo, width=200, caption="目前 Logo")
-        up_logo = st.file_uploader("上傳新 Logo", type=["png", "jpg", "jpeg"])
+        if current_logo:
+            st.image(current_logo, width=200, caption="目前 Logo")
+        
+        up_logo = st.file_uploader("上傳新 Logo (建議 < 50KB)", type=["png", "jpg", "jpeg"])
         if up_logo:
             if st.button("上傳並儲存"):
                 try:
                     bytes_data = up_logo.getvalue()
                     base64_str = base64.b64encode(bytes_data).decode()
                     full_str = f"data:image/png;base64,{base64_str}"
-                    if len(full_str) > 50000: st.error("圖片過大")
+                    if len(full_str) > 50000:
+                        st.error("圖片過大 (超過 50,000 字元)，請壓縮後再試，或使用 URL 方式。")
                     else:
                         sys.update_setting("logo", full_str)
                         st.success("Logo 已更新！"); time.sleep(1); st.rerun()
-                except Exception as e: st.error(f"失敗: {e}")
+                except Exception as e:
+                    st.error(f"處理失敗: {e}")
+        
         st.divider()
+        st.write("或輸入 Logo 圖片網址 (URL)")
         logo_url = st.text_input("圖片連結", placeholder="https://example.com/logo.png")
         if st.button("儲存 URL"):
             if logo_url:
                 sys.update_setting("logo", logo_url)
-                st.success("已更新"); time.sleep(1); st.rerun()
-
-def employee_page():
-    user = st.session_state.user
-    st.header(f"👋 {user['name']}")
-    change_password_ui("user", user['email'])
-    render_personal_task_module(user)
+                st.success("Logo URL 已更新"); time.sleep(1); st.rerun()
 
 def manager_page():
     user = st.session_state.user
     st.header(f"👨‍💼 主管審核 - {user['name']}")
     change_password_ui("user", user['email'])
+    
     mgr_menu = st.sidebar.radio("主管選單", ["👥 團隊審核與報表", "📝 個人任務管理"])
-    if mgr_menu == "📝 個人任務管理": render_personal_task_module(user)
+    
+    if mgr_menu == "📝 個人任務管理":
+        render_personal_task_module(user)
     else:
         df_emp = sys.get_df("employees")
         df_tasks = sys.get_df("tasks")
@@ -725,10 +728,12 @@ def manager_page():
 
         valid_points_map = {"S": [1, 2, 3], "M": [4, 5, 6], "L": [7, 8, 9], "XL": [10, 11, 12]}
         t1, t2 = st.tabs(["✅ 待審核", "📊 團隊總表"])
+        
         with t1:
             if 'page_idx' not in st.session_state: st.session_state.page_idx = 0
             ROWS_PER_PAGE = 50
-            if pending.empty: st.info("目前無待審核案件")
+            if pending.empty:
+                st.info("目前無待審核案件")
             else:
                 st.write(f"待審核總數: {len(pending)} 筆"); st.info("💡 點數規則： S(1-3), M(4-6), L(7-9), XL(10-12)")
                 total_pages = max(1, (len(pending) - 1) // ROWS_PER_PAGE + 1)
@@ -780,6 +785,7 @@ def manager_page():
                         if succ: st.success(f"已處理 {len(updates)} 筆"); time.sleep(1); st.rerun()
                         else: st.error(msg)
                     else: st.warning("無動作")
+
         with t2:
             st.subheader("團隊任務總表 (含 L1 & L2)")
             full_team_emails = get_full_team_emails(user['email'], df_emp)
