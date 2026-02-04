@@ -6,3 +6,4 @@ gspread
 requests
 google-auth
 line-bot-sdk
+google-api-python-client
