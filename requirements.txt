@@ -5,3 +5,4 @@ xlsxwriter
 gspread
 requests
 google-auth
+line-bot-sdk
