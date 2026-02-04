@@ -10,6 +10,8 @@ from email.mime.text import MIMEText
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
+# --- 請在下方加入這行 ---
+from googleapiclient.discovery import build # 新增：用於呼叫行事曆 API
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="聯成教育員工KPI考核系統", layout="wide", page_icon="📈")
@@ -29,9 +31,16 @@ class KPIDB:
 
     def connect(self):
         try:
-            scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+            scope = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+                "https://www.googleapis.com/auth/calendar" # 新增這一行
+            ]
             creds_dict = dict(st.secrets["gcp_service_account"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+                        
+            self.creds = creds # 新增：將憑證存入 self，給行事曆功能使用
+            
             self.client = gspread.authorize(creds)
             sheet_url = st.secrets["sheet_config"]["spreadsheet_url"]
             self.sh = self.client.open_by_url(sheet_url)
@@ -80,6 +89,49 @@ class KPIDB:
             except APIError: time.sleep(1)
         return pd.DataFrame(columns=defaults.get(table_name, []))
 
+    # --- 新增：Google 行事曆寫入功能 ---
+    def add_to_calendar(self, owner_email, title, desc, start_str, end_str):
+        try:
+            # 建立 Calendar 服務
+            service = build('calendar', 'v3', credentials=self.creds)
+            
+            # 處理全天事件的結束日期 (Google 規定全天事件結束日需+1天)
+            # 若格式錯誤則回傳 False
+            try:
+                e_date_obj = datetime.strptime(end_str, "%Y-%m-%d").date()
+                end_date_plus_one = (e_date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
+            except:
+                return False
+
+            event = {
+                'summary': f"【KPI】{title}",
+                'description': desc,
+                'start': {
+                    'date': start_str, # 格式 YYYY-MM-DD
+                    'timeZone': 'Asia/Taipei',
+                },
+                'end': {
+                    'date': end_date_plus_one, # 結束日需+1天才是包含當天
+                    'timeZone': 'Asia/Taipei',
+                },
+                'reminders': {
+                    'useDefault': False,
+                    'overrides': [
+                        {'method': 'popup', 'minutes': 2 * 24 * 60}, # 2天前通知 (分鐘)
+                        {'method': 'email', 'minutes': 24 * 60},     # 1天前寄信
+                    ],
+                },
+            }
+            
+            # 嘗試寫入該 Email 的主行事曆 ('primary' 指的是帳號本身，但這裡是 Service Account)
+            # 必須直接指定 calendarId 為員工 Email
+            service.events().insert(calendarId=owner_email, body=event).execute()
+            print(f"已加入行事曆: {owner_email}")
+            return True
+        except Exception as e:
+            print(f"行事曆寫入失敗 (請確認該員工是否已共用行事曆給機器人): {e}")
+            return False
+            
     def batch_update_sheet(self, ws, df, key_col):
         try:
             ws.clear()
@@ -227,7 +279,22 @@ class KPIDB:
                     if 'points' in up: all_tasks.at[idx, 'points'] = up['points']
                     if 'size' in up: all_tasks.at[idx, 'size'] = up['size']
                     if 'comment' in up: all_tasks.at[idx, 'manager_comment'] = up['comment']
-                    if new_status == "Approved": all_tasks.at[idx, 'approved_at'] = str(date.today())
+                    # 找到這行: if new_status == "Approved":
+                    if new_status == "Approved": 
+                        all_tasks.at[idx, 'approved_at'] = str(date.today())
+                        
+                        # --- 新增：觸發加入行事曆 ---
+                        # 取得任務資訊
+                        t_owner = all_tasks.at[idx, 'owner_email']
+                        t_name = all_tasks.at[idx, 'task_name']
+                        t_desc = all_tasks.at[idx, 'description']
+                        t_start = all_tasks.at[idx, 'start_date']
+                        t_end = all_tasks.at[idx, 'end_date']
+                        
+                        # 呼叫函式
+                        self.add_to_calendar(t_owner, t_name, t_desc, t_start, t_end)
+                        # -------------------------
+
                     count += 1
 
                     owner_email = all_tasks.at[idx, 'owner_email']
@@ -848,4 +915,5 @@ else:
         if is_mgr: manager_page()
         else: 
             employee_page()
+
 
