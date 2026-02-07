@@ -10,8 +10,6 @@ from email.mime.text import MIMEText
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
-# --- 請在下方加入這行 ---
-from googleapiclient.discovery import build # 新增：用於呼叫行事曆 API
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="聯成教育員工KPI考核系統", layout="wide", page_icon="📈")
@@ -31,16 +29,9 @@ class KPIDB:
 
     def connect(self):
         try:
-            scope = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-                "https://www.googleapis.com/auth/calendar" # 新增這一行
-            ]
+            scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds_dict = dict(st.secrets["gcp_service_account"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-                        
-            self.creds = creds # 新增：將憑證存入 self，給行事曆功能使用
-            
             self.client = gspread.authorize(creds)
             sheet_url = st.secrets["sheet_config"]["spreadsheet_url"]
             self.sh = self.client.open_by_url(sheet_url)
@@ -89,40 +80,6 @@ class KPIDB:
             except APIError: time.sleep(1)
         return pd.DataFrame(columns=defaults.get(table_name, []))
 
-    # --- 新增：Google 行事曆寫入功能 ---
-# --- 新增：Google 行事曆寫入功能 (含錯誤回報) ---
-    def add_to_calendar(self, owner_email, title, desc, start_str, end_str):
-        try:
-            # 建立 Calendar 服務
-            service = build('calendar', 'v3', credentials=self.creds)
-            
-            # 處理全天事件的結束日期
-            try:
-                e_date_obj = datetime.strptime(end_str, "%Y-%m-%d").date()
-                end_date_plus_one = (e_date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
-            except:
-                return False, "日期格式錯誤"
-
-            event = {
-                'summary': f"【KPI】{title}",
-                'description': desc,
-                'start': {'date': start_str, 'timeZone': 'Asia/Taipei'},
-                'end': {'date': end_date_plus_one, 'timeZone': 'Asia/Taipei'},
-                'reminders': {
-                    'useDefault': False,
-                    'overrides': [
-                        {'method': 'popup', 'minutes': 2 * 24 * 60}, # 2天前
-                        {'method': 'email', 'minutes': 24 * 60},     # 1天前
-                    ],
-                },
-            }
-            
-            # 寫入
-            service.events().insert(calendarId=owner_email, body=event).execute()
-            return True, "行事曆寫入成功"
-        except Exception as e:
-            return False, f"行事曆失敗: {str(e)} (請確認員工已將日曆共用給機器人)"
-            
     def batch_update_sheet(self, ws, df, key_col):
         try:
             ws.clear()
@@ -161,18 +118,14 @@ class KPIDB:
     def send_line_notify(self, token, message):
         if not token: return
         try:
-            # 這裡改成支援 Messaging API 的 User ID 或是 Notify Token (如果混合使用的話)
-            # 根據您的需求，目前是走 Messaging API，token 其實是 User ID
-            # 這裡需要用到 Secrets 的 Channel Access Token
             line_token = st.secrets["line_config"]["channel_access_token"]
-            
             url = "https://api.line.me/v2/bot/message/push"
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": "Bearer " + line_token
             }
             payload = {
-                "to": token, # 這裡是 User ID
+                "to": token, 
                 "messages": [{"type": "text", "text": message}]
             }
             requests.post(url, headers=headers, json=payload)
@@ -251,14 +204,13 @@ class KPIDB:
             return True, "處理成功"
         except Exception as e: return False, str(e)
 
-def batch_update_tasks_status(self, updates_list):
+    def batch_update_tasks_status(self, updates_list):
         try:
             all_tasks = self.get_df("tasks")
             all_tasks['task_id'] = all_tasks['task_id'].astype(str).str.strip()
             task_map = {str(r['task_id']): i for i, r in all_tasks.iterrows()}
             count = 0
             notify_targets = {} 
-            calendar_results = [] # 收集行事曆結果
 
             for up in updates_list:
                 tid = str(up['task_id']).strip()
@@ -272,25 +224,11 @@ def batch_update_tasks_status(self, updates_list):
                     if 'size' in up: all_tasks.at[idx, 'size'] = up['size']
                     if 'comment' in up: all_tasks.at[idx, 'manager_comment'] = up['comment']
                     if new_status == "Approved": all_tasks.at[idx, 'approved_at'] = str(date.today())
-                    
-                    # --- 取得任務資訊 ---
+                    count += 1
+
                     owner_email = all_tasks.at[idx, 'owner_email']
                     task_name = all_tasks.at[idx, 'task_name']
                     
-                    # --- 行事曆寫入觸發 ---
-                    if new_status == "Approved":
-                        t_desc = all_tasks.at[idx, 'description']
-                        t_start = all_tasks.at[idx, 'start_date']
-                        t_end = all_tasks.at[idx, 'end_date']
-                        # 呼叫行事曆並收集結果
-                        cal_ok, cal_msg = self.add_to_calendar(owner_email, task_name, t_desc, t_start, t_end)
-                        if not cal_ok:
-                            calendar_results.append(f"{owner_email}: {cal_msg}")
-
-                    count += 1
-
-                    # --- LINE 通知邏輯 ---
-                    # 1. 員工送審 -> 通知主管
                     if old_status == "Draft" and new_status == "Submitted":
                         df_emp = self.get_df("employees")
                         u_row = df_emp[df_emp['email'] == owner_email]
@@ -299,29 +237,21 @@ def batch_update_tasks_status(self, updates_list):
                             if mgr_email not in notify_targets: notify_targets[mgr_email] = []
                             notify_targets[mgr_email].append(f"同仁送審：{task_name}")
 
-                    # 2. 主管核准/退件 -> 通知員工
                     if new_status in ["Approved", "Rejected"]:
                         if owner_email not in notify_targets: notify_targets[owner_email] = []
                         st_txt = "✅ 已核准" if new_status == "Approved" else "⚠️ 被退回"
                         notify_targets[owner_email].append(f"任務 {st_txt}：{task_name}")
 
             if count > 0:
-                # 發送 LINE 通知
                 for email, msgs in notify_targets.items():
                     token = self.get_user_token(email)
-                    if token: 
-                        self.send_line_notify(token, "【KPI 通知】\n" + "\n".join(msgs))
-                    else:
-                        print(f"User {email} has no LINE ID, skip.")
-
-                # 顯示行事曆錯誤 (如果有)
-                if calendar_results:
-                    st.error("部分行事曆寫入失敗：\n" + "\n".join(calendar_results))
+                    if token: self.send_line_notify(token, "【KPI 通知】\n" + "\n".join(msgs))
 
                 return self.batch_update_sheet(self.ws_tasks, all_tasks, "task_id")
             return True, "無變更"
         except Exception as e: return False, str(e)
 
+    # 確保縮排正確的方法
     def update_task_content(self, task_id, name, desc, s_date, e_date, size, status="Submitted"):
         try:
             cell = self.ws_tasks.find(str(task_id).strip(), in_column=1)
@@ -700,7 +630,6 @@ def admin_page():
             if up and st.button("確認匯入"):
                 sys.batch_import_employees(pd.read_excel(up))
                 st.success("匯入完成"); st.rerun()
-    
     with tab2:
         st.subheader("組織資料維護")
         with st.expander("➕ 單筆新增部門"):
@@ -880,7 +809,7 @@ def login_page():
                 st.rerun()
             else: st.error("帳號或密碼錯誤")
 
-# --- 7. 員工頁面入口 ---
+# --- 7. 員工頁面入口 (關鍵補回) ---
 def employee_page():
     user = st.session_state.user
     st.header(f"👋 {user['name']}")
@@ -915,6 +844,3 @@ else:
         if is_mgr: manager_page()
         else: 
             employee_page()
-
-
-
