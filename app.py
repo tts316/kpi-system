@@ -251,7 +251,6 @@ class KPIDB:
             return True, "無變更"
         except Exception as e: return False, str(e)
 
-    # 確保縮排正確的方法
     def update_task_content(self, task_id, name, desc, s_date, e_date, size, status="Submitted"):
         try:
             cell = self.ws_tasks.find(str(task_id).strip(), in_column=1)
@@ -408,18 +407,16 @@ def change_password_ui(role, email):
         
         with tab2:
             st.markdown("### 🔔 LINE 綁定設定")
-            st.info("請輸入您的 LINE User ID (U 開頭亂碼)，以接收推播通知。")
-            uid_in = st.text_input("LINE User ID", key="uid_in")
-            if st.button("儲存 ID"):
-                if uid_in:
-                    succ, msg = sys.update_line_token(email, uid_in)
-                    if succ:
-                        st.success(msg)
-                        sys.send_line_notify(uid_in, "【系統測試】\n恭喜！您的 LINE 通知已綁定成功！")
-                    else:
-                        st.error(msg)
-                else:
-                    st.warning("請輸入 User ID")
+            # [修正] 移除輸入框，改為操作指引與狀態顯示
+            st.info("請加入官方帳號好友，並傳送您的 Email 進行自動綁定。")
+            st.markdown("**官方帳號 ID: `@143ndfws`** (聯成電腦總公司)")
+            
+            # 顯示目前綁定狀態
+            token = sys.get_user_token(email)
+            if token:
+                st.success(f"✅ 已綁定 LINE (ID: {token[:4]}****{token[-4:]})")
+            else:
+                st.warning("❌ 尚未綁定，請掃描 QR Code 或搜尋 ID 加好友。")
 
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
@@ -452,8 +449,11 @@ def render_personal_task_module(user):
             
             drafts = my_tasks[my_tasks['status'] == 'Draft']
             submitted = my_tasks[my_tasks['status'] == 'Submitted']
+            
+            # [修正] 歷史紀錄 (已核可/退回) 合併處理，並加入年/月/任務三層摺疊
             approved = my_tasks[my_tasks['status'] == 'Approved']
             rejected = my_tasks[my_tasks['status'] == 'Rejected']
+            history = pd.concat([approved, rejected])
 
             st.markdown("### 💾 暫存任務")
             if not drafts.empty:
@@ -501,34 +501,53 @@ def render_personal_task_module(user):
             if not submitted.empty: st.dataframe(submitted[['task_name', 'start_date', 'end_date', 'size', 'description']], hide_index=True)
             else: st.caption("無送審任務")
             
-            st.divider(); st.markdown("### ✅ 已核可 / ⚠️ 被退回")
-            if not rejected.empty:
-                for i, r in rejected.iterrows():
-                    with st.expander(f"⚠️ {r['task_name']} (被退回)"):
-                        st.error(f"主管評語: {r['manager_comment']}")
-                        with st.form(f"edit_rej_{r['task_id']}"):
-                            st.write("修改後重新送出：")
-                            nn = st.text_input("名稱", value=r['task_name']); nd = st.text_input("說明", value=r['description'])
-                            c1, c2, c3 = st.columns(3)
-                            ns = c1.date_input("開始", value=pd.to_datetime(r['start_date'])); ne = c2.date_input("結束", value=pd.to_datetime(r['end_date']))
-                            nz = c3.selectbox("大小", ["S","M","L","XL"], index=["S","M","L","XL"].index(r['size']))
-                            c_sub, c_del = st.columns(2)
-                            if c_sub.form_submit_button("🚀 重送"):
-                                sys.update_task_content(r['task_id'], nn, nd, ns, ne, nz, "Submitted")
-                                st.success("已重送"); time.sleep(1); st.rerun()
-                            if c_del.form_submit_button("🗑️ 刪除"):
-                                sys.delete_task(r['task_id']); st.rerun()
-            if not approved.empty:
-                for i, r in approved.iterrows():
-                    with st.expander(f"✅ {r['task_name']} ({r['points']}點)"):
-                        st.write(f"📅 {r['start_date']} ~ {r['end_date']}")
-                        exp = calc_expected_progress(r['start_date'], r['end_date'])
-                        c1, c2 = st.columns(2)
-                        c1.metric("目前進度", f"{r['progress_pct']}%"); c2.metric("預計進度", f"{exp}%", delta=r['progress_pct']-exp)
-                        with st.form(f"p_{r['task_id']}"):
-                            np = st.slider("更新進度", 0, 100, int(r['progress_pct'])); nd = st.text_input("回報說明", max_chars=50)
-                            if st.form_submit_button("回報"):
-                                sys.update_progress(r['task_id'], np, nd); st.rerun()
+            st.divider(); st.markdown("### ✅ 已核可 / ⚠️ 被退回 (歷史紀錄)")
+            if not history.empty:
+                # [新增] 依年份 -> 月份 分組
+                history['start_dt'] = pd.to_datetime(history['start_date'])
+                history['year'] = history['start_dt'].dt.year
+                history['month'] = history['start_dt'].dt.month
+                
+                # 排序年份 (新到舊)
+                years = sorted(history['year'].unique(), reverse=True)
+                
+                for y in years:
+                    with st.expander(f"📅 {y} 年", expanded=False):
+                        # 該年月份排序
+                        months = sorted(history[history['year'] == y]['month'].unique(), reverse=True)
+                        for m in months:
+                            with st.expander(f"🗓️ {m} 月", expanded=False):
+                                monthly_tasks = history[(history['year'] == y) & (history['month'] == m)]
+                                
+                                for i, r in monthly_tasks.iterrows():
+                                    status_icon = "✅" if r['status'] == "Approved" else "⚠️"
+                                    # [修正] 第三層：任務詳情
+                                    with st.expander(f"{status_icon} {r['task_name']} ({r['points']}點)"):
+                                        if r['status'] == "Rejected":
+                                            st.error(f"主管評語: {r['manager_comment']}")
+                                            with st.form(f"edit_rej_{r['task_id']}"):
+                                                nn = st.text_input("名稱", value=r['task_name'])
+                                                nd = st.text_input("說明", value=r['description'])
+                                                c1, c2, c3 = st.columns(3)
+                                                ns = c1.date_input("開始", value=pd.to_datetime(r['start_date'])); ne = c2.date_input("結束", value=pd.to_datetime(r['end_date']))
+                                                nz = c3.selectbox("大小", ["S","M","L","XL"], index=["S","M","L","XL"].index(r['size']))
+                                                c_sub, c_del = st.columns(2)
+                                                if c_sub.form_submit_button("🚀 重送"):
+                                                    sys.update_task_content(r['task_id'], nn, nd, ns, ne, nz, "Submitted")
+                                                    st.success("已重送"); time.sleep(1); st.rerun()
+                                                if c_del.form_submit_button("🗑️ 刪除"):
+                                                    sys.delete_task(r['task_id']); st.rerun()
+                                        else:
+                                            st.write(f"📅 {r['start_date']} ~ {r['end_date']}")
+                                            exp = calc_expected_progress(r['start_date'], r['end_date'])
+                                            c1, c2 = st.columns(2)
+                                            c1.metric("目前進度", f"{r['progress_pct']}%"); c2.metric("預計進度", f"{exp}%", delta=r['progress_pct']-exp)
+                                            with st.form(f"p_{r['task_id']}"):
+                                                np = st.slider("更新進度", 0, 100, int(r['progress_pct'])); nd = st.text_input("回報說明", max_chars=50)
+                                                if st.form_submit_button("回報"):
+                                                    sys.update_progress(r['task_id'], np, nd); st.rerun()
+            else:
+                st.caption("尚無歷史紀錄")
 
     with t2:
         st.subheader("批次新增任務")
@@ -591,12 +610,24 @@ def render_personal_task_module(user):
         st.subheader("📖 員工 KPI 考核辦法")
         st.markdown("1. 點數：S(1-3), M(4-6), L(7-9), XL(10-12)\n2. 預計進度：依天數計算\n3. 簽核：暫存 -> 送審 -> 核准/退件")
 
-# --- UI Pages (Admin) ---
+# --- UI Pages ---
+def login_page():
+    st.markdown("## 📈 聯成教育員工KPI考核系統")
+    col1, col2 = st.columns(2)
+    with col1:
+        email_input = st.text_input("帳號 (Email)")
+        password = st.text_input("密碼", type="password")
+        if st.button("登入", type="primary"):
+            user = sys.verify_user(email_input, password)
+            if user:
+                st.session_state.user = user
+                st.rerun()
+            else: st.error("帳號或密碼錯誤")
+
 def admin_page():
     st.header("🔧 管理後台")
     change_password_ui("admin", "admin")
     tab1, tab2, tab3 = st.tabs(["👥 員工管理", "🏢 組織圖", "⚙️ 系統設定"])
-    
     with tab1:
         st.subheader("員工資料維護")
         with st.expander("➕ 單筆新增員工"):
@@ -795,27 +826,6 @@ def manager_page():
                         st.dataframe(dept_data[cols_to_show].style.map(highlight_delay, subset=['進度差異']), column_config={"name": "姓名", "task_name": "任務", "progress_pct": "回報%", "progress_desc": "說明"}, use_container_width=True)
             else: st.info("您目前沒有下屬資料")
 
-# --- 6. 登入頁 ---
-def login_page():
-    st.markdown("## 📈 聯成教育員工KPI考核系統")
-    col1, col2 = st.columns(2)
-    with col1:
-        email_input = st.text_input("帳號 (Email)")
-        password = st.text_input("密碼", type="password")
-        if st.button("登入", type="primary"):
-            user = sys.verify_user(email_input, password)
-            if user:
-                st.session_state.user = user
-                st.rerun()
-            else: st.error("帳號或密碼錯誤")
-
-# --- 7. 員工頁面入口 (關鍵補回) ---
-def employee_page():
-    user = st.session_state.user
-    st.header(f"👋 {user['name']}")
-    change_password_ui("user", user['email'])
-    render_personal_task_module(user)
-
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
 
@@ -830,6 +840,7 @@ with st.sidebar:
         except: pass
     st.divider()
 
+# 定義完所有函式後，才開始執行邏輯
 if st.session_state.user is None:
     login_page()
 else:
@@ -837,6 +848,7 @@ else:
     with st.sidebar:
         st.write(f"👤 {st.session_state.user['name']}")
         if st.button("登出"): st.session_state.user = None; st.rerun()
+    
     if role == "admin": admin_page()
     else:
         df_emp = sys.get_df("employees")
