@@ -14,10 +14,10 @@ from gspread.exceptions import APIError
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="聯成教育員工KPI考核系統", layout="wide", page_icon="📈")
 
-POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
-
-# QR Code 圖片連結 (來自您的 GitHub)
+# 官方帳號 QR Code (來自您的 GitHub)
 LINE_QR_CODE_URL = "https://raw.githubusercontent.com/tts316/Resume_System/main/qrcode.png"
+
+POINT_RANGES = {"S": (1, 3), "M": (4, 6), "L": (7, 9), "XL": (10, 12)}
 
 # Email 設定
 SMTP_SERVER = "smtp.gmail.com"
@@ -422,6 +422,7 @@ def change_password_ui(role, email):
             else:
                 st.warning("❌ 尚未綁定，請掃描 QR Code 或搜尋 ID 加好友。")
 
+# --- 共用模組：個人任務功能 ---
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
         st.session_state.batch_df = pd.DataFrame({
@@ -711,6 +712,111 @@ def employee_page():
     st.header(f"👋 {user['name']}")
     change_password_ui("user", user['email'])
     render_personal_task_module(user)
+
+def manager_page():
+    user = st.session_state.user
+    st.header(f"👨‍💼 主管審核 - {user['name']}")
+    change_password_ui("user", user['email'])
+    
+    mgr_menu = st.sidebar.radio("主管選單", ["👥 團隊審核與報表", "📝 個人任務管理"])
+    
+    if mgr_menu == "📝 個人任務管理":
+        render_personal_task_module(user)
+    else:
+        df_emp = sys.get_df("employees")
+        df_tasks = sys.get_df("tasks")
+        l1_emails = df_emp[df_emp['manager_email'] == user['email']]['email'].tolist()
+        pending = df_tasks[df_tasks['owner_email'].isin(l1_emails) & (df_tasks['status'] == "Submitted")].copy()
+        
+        pending_count = len(pending)
+        if pending_count > 0: st.warning(f"🔔 提醒：您有 **{pending_count}** 筆任務等待審核！")
+        else: st.success("✅ 目前沒有待審核任務。")
+
+        valid_points_map = {"S": [1, 2, 3], "M": [4, 5, 6], "L": [7, 8, 9], "XL": [10, 11, 12]}
+        t1, t2 = st.tabs(["✅ 待審核", "📊 團隊總表"])
+        
+        with t1:
+            if 'page_idx' not in st.session_state: st.session_state.page_idx = 0
+            ROWS_PER_PAGE = 50
+            if pending.empty:
+                st.info("目前無待審核案件")
+            else:
+                st.write(f"待審核總數: {len(pending)} 筆"); st.info("💡 點數規則： S(1-3), M(4-6), L(7-9), XL(10-12)")
+                total_pages = max(1, (len(pending) - 1) // ROWS_PER_PAGE + 1)
+                if st.session_state.page_idx >= total_pages: st.session_state.page_idx = 0
+                start = st.session_state.page_idx * ROWS_PER_PAGE
+                end = start + ROWS_PER_PAGE
+                page_data = pending.iloc[start:end].copy()
+                page_data['審核決定'] = "無動作" 
+                page_data['核定等級'] = page_data['size'] 
+                page_data['給予點數'] = page_data['size'].map(lambda x: valid_points_map.get(x, [0])[1] if len(valid_points_map.get(x, []))>=2 else 0)
+                page_data['評語'] = ""
+                display_cols = ['task_id', 'owner_email', 'task_name', 'description', 'start_date', 'end_date', 'size', '核定等級', '給予點數', '評語', '審核決定']
+                edited_review = st.data_editor(
+                    page_data[display_cols],
+                    column_config={
+                        "task_id": st.column_config.TextColumn(disabled=True),
+                        "owner_email": st.column_config.TextColumn("申請人", disabled=True),
+                        "task_name": st.column_config.TextColumn("任務", disabled=True),
+                        "description": st.column_config.TextColumn("說明", disabled=True),
+                        "size": st.column_config.TextColumn("申請", disabled=True),
+                        "核定等級": st.column_config.SelectboxColumn("核定", options=["S", "M", "L", "XL"], required=True),
+                        "給予點數": st.column_config.SelectboxColumn("點數", options=list(range(13)), required=True),
+                        "審核決定": st.column_config.SelectboxColumn("決定", options=["無動作", "核准 (Approve)", "退件 (Reject)"], required=True)
+                    },
+                    use_container_width=True, hide_index=True, key=f"editor_{st.session_state.page_idx}"
+                )
+                c1, c2, c3 = st.columns([1, 1, 3])
+                if st.session_state.page_idx > 0:
+                    if c1.button("⬅️ 上一頁"): st.session_state.page_idx -= 1; st.rerun()
+                if st.session_state.page_idx < total_pages - 1:
+                    if c2.button("下一頁 ➡️"): st.session_state.page_idx += 1; st.rerun()
+                if c3.button("✅ 送出本頁審核結果", type="primary"):
+                    updates = []
+                    has_error = False; error_msg = ""
+                    for i, r in edited_review.iterrows():
+                        decision = r['審核決定']
+                        if decision == "核准 (Approve)":
+                            vr = valid_points_map.get(r['核定等級'], [])
+                            if r['給予點數'] not in vr:
+                                has_error = True
+                                error_msg = f"❌ {r['task_name']} 點數錯誤！{r['核定等級']} 應為 {min(vr)}~{max(vr)}"
+                                break
+                            updates.append({"task_id": r['task_id'], "status": "Approved", "size": r['核定等級'], "points": r['給予點數'], "comment": r['評語']})
+                        elif decision == "退件 (Reject)":
+                            updates.append({"task_id": r['task_id'], "status": "Rejected", "comment": r['評語']})
+                    if has_error: st.error(error_msg)
+                    elif updates:
+                        succ, msg = sys.batch_update_tasks_status(updates)
+                        if succ: st.success(f"已處理 {len(updates)} 筆"); time.sleep(1); st.rerun()
+                        else: st.error(msg)
+                    else: st.warning("無動作")
+
+        with t2:
+            st.subheader("團隊任務總表 (含 L1 & L2)")
+            full_team_emails = get_full_team_emails(user['email'], df_emp)
+            if full_team_emails:
+                team_tasks = df_tasks[df_tasks['owner_email'].isin(full_team_emails)].copy()
+                merged_df = team_tasks.merge(df_emp[['email', 'name', 'department']], left_on='owner_email', right_on='email', how='left')
+                merged_df['預計%'] = merged_df.apply(lambda x: calc_expected_progress(x['start_date'], x['end_date']), axis=1)
+                merged_df['進度差異'] = merged_df['progress_pct'] - merged_df['預計%']
+                
+                filter_status = st.radio("顯示狀態", ["全部", "進行中 (Approved)", "已完成 (Completed)"], horizontal=True)
+                if filter_status == "進行中 (Approved)": display_df = merged_df[merged_df['status'] == 'Approved']
+                elif filter_status == "已完成 (Completed)": display_df = merged_df[merged_df['status'] == 'Completed']
+                else: display_df = merged_df
+
+                unique_depts = display_df['department'].unique()
+                for dept in unique_depts:
+                    with st.expander(f"🏢 {dept}", expanded=True):
+                        dept_data = display_df[display_df['department'] == dept].sort_values(by='進度差異')
+                        cols_to_show = ['name', 'task_name', 'start_date', 'end_date', 'points', 'status', 'progress_pct', '預計%', '進度差異', 'progress_desc']
+                        def highlight_delay(val):
+                            if val < -20: return 'background-color: #ffcccc; color: red'
+                            elif val < -5: return 'color: red'
+                            return ''
+                        st.dataframe(dept_data[cols_to_show].style.map(highlight_delay, subset=['進度差異']), column_config={"name": "姓名", "task_name": "任務", "progress_pct": "回報%", "progress_desc": "說明"}, use_container_width=True)
+            else: st.info("您目前沒有下屬資料")
 
 # --- Entry ---
 if 'user' not in st.session_state: st.session_state.user = None
