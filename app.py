@@ -491,9 +491,9 @@ def change_password_ui(role, email):
             
             st.markdown("""
             1. 開啟 **[Google 日曆](https://calendar.google.com/)** 網頁版。
-            2. 在左側 **「我的日曆」** 找到您自己的日曆，點擊右邊的三個點 **「⋮」** -> **「設定與共用」**。
-            3. 往下捲動至 **「與特定使用者共用日曆」** 區塊。
-            4. 點擊 **「新增使用者」**，並貼上以下 **機器人 Email**：
+            2. 在左側 **「我的日曆」** 找到您自己的日曆，點擊右邊的設定「⚙️」
+            3. 在右側 -> 「我的日曆設定」->往下捲動至**「共用對象」** 區塊。
+            4. 點擊 **「新增使用者和群組」**，並貼上以下 **機器人 Email**：
             """)
             
             # 這是您之前 JSON 檔裡的 client_email，提供按鈕方便複製
@@ -501,7 +501,7 @@ def change_password_ui(role, email):
             st.code(service_account_email, language="text")
             
             st.warning("⚠️ 重要：權限請務必選擇 **【變更活動】 (Make changes to events)**，否則系統無法寫入。")
-            st.markdown("6. 完成後，當主管核准任務時，系統便會自動將任務加入您的行事曆並設定提醒。")
+            st.markdown("5. 完成後，當主管核准任務時，系統便會自動將任務加入您的行事曆並設定提醒。")
             
 # --- 共用模組：個人任務功能 ---
 def render_personal_task_module(user):
@@ -844,4 +844,5 @@ else:
         if is_mgr: manager_page()
         else: 
             employee_page()
+
 
