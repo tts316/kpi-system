@@ -900,6 +900,7 @@ def manager_page():
                         st.dataframe(dept_data[cols_to_show].style.map(highlight_delay, subset=['進度差異']), column_config={"name": "姓名", "task_name": "任務", "progress_pct": "回報%", "progress_desc": "說明"}, use_container_width=True)
             else: st.info("您目前沒有下屬資料")
 
+    
 # --- 6. 登入頁 ---
 def login_page():
     st.markdown("## 📈 聯成教育員工KPI考核系統")
@@ -949,6 +950,7 @@ else:
         if is_mgr: manager_page()
         else: 
             employee_page()
+
 
 
 
