@@ -456,8 +456,9 @@ def get_full_team_emails(manager_email, df_emp):
 
 # --- UI Components ---
 def change_password_ui(role, email):
-    with st.expander("🔑 帳號設定 (密碼 / LINE通知)"):
-        tab1, tab2 = st.tabs(["修改密碼", "設定 LINE 通知"])
+    # [修改] 標題增加日曆，並新增 tab3
+    with st.expander("🔑 帳號設定 (密碼 / LINE / Google日曆)"):
+        tab1, tab2, tab3 = st.tabs(["修改密碼", "設定 LINE 通知", "設定 Google 日曆"])
         
         with tab1:
             new_p = st.text_input("新密碼", type="password", key="new_p")
@@ -471,7 +472,7 @@ def change_password_ui(role, email):
         
         with tab2:
             st.markdown("### 🔔 LINE 綁定設定")
-            # [新增] QR Code 顯示
+            # QR Code 顯示
             st.image(LINE_QR_CODE_URL, width=200, caption="掃描加入官方帳號")
             st.info("請加入官方帳號好友，並傳送您的 Email 進行自動綁定。")
             st.markdown("**官方帳號 ID: `@143ndfws`** (聯成電腦總公司)")
@@ -483,6 +484,25 @@ def change_password_ui(role, email):
             else:
                 st.warning("❌ 尚未綁定，請掃描 QR Code 或搜尋 ID 加好友。")
 
+        # [新增] Google 日曆設定說明分頁
+        with tab3:
+            st.markdown("### 📅 Google 日曆同步設定")
+            st.info("若希望審核通過的任務自動加入您的 Google 日曆，請完成以下授權：")
+            
+            st.markdown("""
+            1. 開啟 **[Google 日曆](https://calendar.google.com/)** 網頁版。
+            2. 在左側 **「我的日曆」** 找到您自己的日曆，點擊右邊的三個點 **「⋮」** -> **「設定與共用」**。
+            3. 往下捲動至 **「與特定使用者共用日曆」** 區塊。
+            4. 點擊 **「新增使用者」**，並貼上以下 **機器人 Email**：
+            """)
+            
+            # 這是您之前 JSON 檔裡的 client_email，提供按鈕方便複製
+            service_account_email = "stock-system@stocksystem-480101.iam.gserviceaccount.com"
+            st.code(service_account_email, language="text")
+            
+            st.warning("⚠️ 重要：權限請務必選擇 **【變更活動】 (Make changes to events)**，否則系統無法寫入。")
+            st.markdown("6. 完成後，當主管核准任務時，系統便會自動將任務加入您的行事曆並設定提醒。")
+            
 # --- 共用模組：個人任務功能 ---
 def render_personal_task_module(user):
     if 'batch_df' not in st.session_state:
@@ -824,3 +844,4 @@ else:
         if is_mgr: manager_page()
         else: 
             employee_page()
+
