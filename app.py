@@ -890,14 +890,43 @@ def manager_page():
 
                 unique_depts = display_df['department'].unique()
                 for dept in unique_depts:
+                    # 第一層：部門
                     with st.expander(f"🏢 {dept}", expanded=True):
-                        dept_data = display_df[display_df['department'] == dept].sort_values(by='進度差異')
-                        cols_to_show = ['name', 'task_name', 'start_date', 'end_date', 'points', 'status', 'progress_pct', '預計%', '進度差異', 'progress_desc']
-                        def highlight_delay(val):
-                            if val < -20: return 'background-color: #ffcccc; color: red'
-                            elif val < -5: return 'color: red'
-                            return ''
-                        st.dataframe(dept_data[cols_to_show].style.map(highlight_delay, subset=['進度差異']), column_config={"name": "姓名", "task_name": "任務", "progress_pct": "回報%", "progress_desc": "說明"}, use_container_width=True)
+                        dept_data = display_df[display_df['department'] == dept]
+                        
+                        # 取得該部門下的人員姓名
+                        unique_people = dept_data['name'].unique()
+                        
+                        for person_name in unique_people:
+                            person_data = dept_data[dept_data['name'] == person_name].sort_values(by='進度差異')
+                            
+                            # 計算該員統計數據
+                            p_count = len(person_data)
+                            p_points = person_data['points'].sum()
+                            
+                            # 第二層：人員 (預設縮起 expanded=False)
+                            with st.expander(f"👤 {person_name} ({p_count} 筆 / 共 {p_points} 點)", expanded=False):
+                                cols_to_show = ['task_name', 'start_date', 'end_date', 'points', 'status', 'progress_pct', '預計%', '進度差異', 'progress_desc']
+                                
+                                def highlight_delay(val):
+                                    if val < -20: return 'background-color: #ffcccc; color: red'
+                                    elif val < -5: return 'color: red'
+                                    return ''
+
+                                st.dataframe(
+                                    person_data[cols_to_show].style.map(highlight_delay, subset=['進度差異']),
+                                    column_config={
+                                        "task_name": "任務名稱", 
+                                        "start_date": "開始",
+                                        "end_date": "結束",
+                                        "points": "點數",
+                                        "status": "狀態",
+                                        "progress_pct": "回報%", 
+                                        "progress_desc": "進度說明"
+                                    },
+                                    use_container_width=True
+                                )
+                # --- [修改區段結束] ---
             else: st.info("您目前沒有下屬資料")
 
     
@@ -950,6 +979,7 @@ else:
         if is_mgr: manager_page()
         else: 
             employee_page()
+
 
 
 
